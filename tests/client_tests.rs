@@ -1,38 +1,39 @@
-use distri::client::Client;
+// tests/integration_test.rs
+use tokio;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use cloud::CloudNode;
+use client::Client;
 
-#[test]
-fn test_client_register_node() {
-    let client = Client::default();
-    let addr: SocketAddr = "127.0.0.1:8081".parse().unwrap();
-    client.register_node("Node1".to_string(), addr);
-    
-    // Check if the node was correctly registered (using a public API function)
-    let nodes = client.get_nodes();
-    assert_eq!(nodes.get("Node1"), Some(&addr));
-}
+#[tokio::test]
+async fn test_client_server_communication() -> Result<(), Box<dyn std::error::Error>> {
+    // Callback function to handle server-side file handling (empty in this case)
+    let callback = Arc::new(Mutex::new(|_file_data: Vec<u8>| {
+        // Handle file data if needed (currently doing nothing)
+    }));
 
-#[test]
-fn test_client_send_data() {
-    let client = Client::default();
-    let addr: SocketAddr = "127.0.0.1:8081".parse().unwrap();
-    client.register_node("Node1".to_string(), addr);
+    // Start the server (CloudNode) on a background task
+    let server_addr: SocketAddr = "127.0.0.1:8080".parse()?;
+    let cloud_node = CloudNode::new(callback.clone(), server_addr, None, 1024)?;
+    let cloud_node = Arc::new(cloud_node);
 
-    let data = b"Hello, world!";
-    let result = client.send_data(data);
+    let server = tokio::spawn({
+        let cloud_node = cloud_node.clone();
+        async move {
+            cloud_node.serve().await.unwrap();
+        }
+    });
 
-    // Sending data should succeed (result is Ok)
-    assert!(result.is_ok());
-}
+    // Set up the client
+    let mut nodes = HashMap::new();
+    nodes.insert("server".to_string(), server_addr);
+    let client = Client::new(Some(nodes), Some(1024));
 
-#[test]
-fn test_chunking_logic() {
-    // You can test public functions, but here chunking is internal
-    // So this would require a unit test unless you exposed it publicly
-    let client = Client::new(None, 10);
-    let data = b"Some large data to test chunking!";
-    let chunks = client.send_data(data);
+    // Send a message from the client to the server
+    client.send_data("Hello, server!", None, "server").await?;
 
-    // Check if sending large data chunking succeeds
-    assert!(chunks.is_ok());
+    // Await the server task to ensure it runs until completion (it won't in this case as it's a loop)
+    server.abort();  // Abort server loop after test
+
+    Ok(())
 }
