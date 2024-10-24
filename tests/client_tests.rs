@@ -1,39 +1,99 @@
 // tests/integration_test.rs
-use tokio;
+use distri::client::Client;
+use distri::cloud::CloudNode;
+use distri::utils::{END_OF_TRANSMISSION, server_decrypt_img, server_encrypt_img};
+
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+use std::sync::{Arc};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use cloud::CloudNode;
-use client::Client;
+use std::collections::HashMap;
+
+
+fn mock_encrypt_callback() -> Arc<Mutex<dyn Fn(Vec<u8>) -> Vec<u8> + Send + 'static>> {
+    Arc::new(Mutex::new(move |data: Vec<u8>| -> Vec<u8> {
+        let img_path = "files/to_encrypt.jpg";
+        let output_path = "files/encrypted_output.jpg";
+
+        tokio::runtime::Handle::current().block_on(async move {
+            // Step 1: Write data bytes to a file (e.g., 'to_encrypt.png')
+            let mut file = File::create(img_path).await.unwrap();
+            file.write_all(&data).await.unwrap();
+
+            // Step 2: Call `server_encrypt_img` to perform encryption on the file
+            server_encrypt_img("files/placeholder.jpg", img_path, output_path).await;
+
+            // Step 3: Read the encrypted output file as bytes
+            let mut encrypted_file = File::open(output_path).await.unwrap();
+            let mut encrypted_data = Vec::new();
+            encrypted_file.read_to_end(&mut encrypted_data).await.unwrap();
+
+            // Return the encrypted data as the output
+            encrypted_data
+        })
+    }))
+}
 
 #[tokio::test]
-async fn test_client_server_communication() -> Result<(), Box<dyn std::error::Error>> {
-    // Callback function to handle server-side file handling (empty in this case)
-    let callback = Arc::new(Mutex::new(|_file_data: Vec<u8>| {
-        // Handle file data if needed (currently doing nothing)
-    }));
+async fn test_send_data_to_servers() {
+    // Test Setup:
+    // Create two server nodes: one elected, one not elected.
+    let callback = mock_encrypt_callback();
 
-    // Start the server (CloudNode) on a background task
-    let server_addr: SocketAddr = "127.0.0.1:8080".parse()?;
-    let cloud_node = CloudNode::new(callback.clone(), server_addr, None, 1024)?;
-    let cloud_node = Arc::new(cloud_node);
+    let server_addr1: SocketAddr = "127.0.0.1:8081".parse().unwrap();
+    let server_addr2: SocketAddr = "127.0.0.1:8082".parse().unwrap();
 
-    let server = tokio::spawn({
-        let cloud_node = cloud_node.clone();
-        async move {
-            cloud_node.serve().await.unwrap();
-        }
+    let node_map: HashMap<String, SocketAddr> = vec![
+        ("Server1".to_string(), server_addr1),
+        ("Server2".to_string(), server_addr2),
+    ].into_iter().collect();
+
+    let chunk_size:usize = 1024;
+
+    // Server 1 (elected = true)
+    let server1 = CloudNode::new(callback.clone(), server_addr1, None, chunk_size, true).await.unwrap();
+    let server1_arc = Arc::new(server1);
+
+    // Server 2 (elected = false)
+    let server2 = CloudNode::new(callback.clone(), server_addr2, None, chunk_size, false).await.unwrap();
+    let server2_arc = Arc::new(server2);
+
+    // Spawn the server tasks
+    let server1_task = tokio::spawn(async move {
+        server1_arc.serve().await.unwrap();
     });
 
-    // Set up the client
-    let mut nodes = HashMap::new();
-    nodes.insert("server".to_string(), server_addr);
-    let client = Client::new(Some(nodes), Some(1024));
+    let server2_task = tokio::spawn(async move {
+        server2_arc.serve().await.unwrap();
+    });
 
-    // Send a message from the client to the server
-    client.send_data("Hello, server!", None, "server").await?;
+    // Client setup: Create a client and register the two servers
+    let mut client = Client::new(Some(node_map), Some(chunk_size));
 
-    // Await the server task to ensure it runs until completion (it won't in this case as it's a loop)
-    server.abort();  // Abort server loop after test
+    // Test file creation (simulate sending `test.png`)
+    let file_path = "files/img.jpg";
+    let mut file = File::create(file_path).await.unwrap();
+    file.write_all(b"This is a test image file").await.unwrap();
 
-    Ok(())
+    // Register the server nodes in the client
+    client.register_node("Server1".to_string(), server_addr1);
+    client.register_node("Server2".to_string(), server_addr2);
+
+
+    // Simulate sending `test.png` to the servers
+    client.send_data(Some(file_path.as_ref())).await.unwrap();
+    assert!(false);
+
+    // Ensure the servers handled the connection properly (let them process)
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+    // // Cleanup: Remove test file
+    // tokio::fs::remove_file(file_path).await.unwrap();
+
+    // Ensure the servers complete their tasks
+    // server1_task.await.unwrap();
+    // server2_task.await.unwrap();
+
+    assert!(false);
 }

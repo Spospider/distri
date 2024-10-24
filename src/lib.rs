@@ -1,6 +1,6 @@
 pub mod client;
 pub mod cloud;
-mod utils;
+pub mod utils;
 
 
 pub fn add(left: usize, right: usize) -> usize {

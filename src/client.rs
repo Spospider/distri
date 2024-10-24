@@ -1,20 +1,22 @@
 use tokio::net::UdpSocket;
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::path::Path;
 use std::net::SocketAddr;
 use std::error::Error;
-use crate::utils::serialize_data;
+use tokio::fs::File;
+use crate::utils::{END_OF_TRANSMISSION, server_decrypt_img};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 
 pub struct Client {
-    nodes: Arc<Mutex<HashMap<String, SocketAddr>>>,  // Keeps track of server nodes
-    chunk_size: u32,
+    nodes: HashMap<String, SocketAddr>,  // Keeps track of server nodes
+    chunk_size: usize,
 }
 
 impl Default for Client {
     fn default() -> Self {
         Client {
-            nodes: Arc::new(Mutex::new(HashMap::new())),
+            nodes: HashMap::new(),
             chunk_size: 1024,
         }
     }
@@ -22,45 +24,107 @@ impl Default for Client {
 
 impl Client {
     /// Creates a new client instance
-    pub fn new(nodes: Option<HashMap<String, SocketAddr>>, chunk_size: Option<u32>) -> Self {
+    pub fn new(nodes: Option<HashMap<String, SocketAddr>>, chunk_size: Option<usize>) -> Self {
         let initial_nodes = nodes.unwrap_or_else(HashMap::new);
-        let final_chunk_size: u32 = chunk_size.unwrap_or(1024);
+        let final_chunk_size: usize = chunk_size.unwrap_or(1024);
 
         Client {
-            nodes: Arc::new(Mutex::new(initial_nodes)),
+            nodes: initial_nodes,
             chunk_size: final_chunk_size,
         }
     }
 
     /// Registers a server node with its name and address
-    pub fn register_node(&self, name: String, address: SocketAddr) {
-        let mut nodes = self.nodes.lock().unwrap();
-        nodes.insert(name, address);
+    pub fn register_node(&mut self, name: String, address: SocketAddr) {
+        self.nodes.insert(name, address);
     }
 
-    /// Sends data (message and optional file) to a registered server node via UDP
     /// and waits for the server's response.
-    pub async fn send_data(&self, message: &str, file_path: Option<&Path>, server_name: &str) -> Result<(), Box<dyn Error>> {
-        // Get the server address from the nodes list
-        let nodes = self.nodes.lock().unwrap();
-        let server_addr = match nodes.get(server_name) {
-            Some(addr) => addr,
-            None => return Err("Server not found".into()),
-        };
-
-        // Serialize the message and file into a JSON string
-        let serialized_data = serialize_data(message, file_path)?;
-
-        // Create the UDP socket
+    pub async fn send_data(&self, file_path: Option<&Path>) -> Result<(), Box<dyn Error>> {
+        
+        // Create a UDP socket for sending and receiving messages
         let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
-        socket.send_to(serialized_data.as_bytes(), server_addr).await?;
+        
+        let request_message = "Request: Encrypt".to_string(); // The message to be sent
 
-        // Wait for the server's response
-        let mut buf = [0u8; 1024];
-        let (size, _) = socket.recv_from(&mut buf).await?;
-        let response = String::from_utf8(buf[..size].to_vec())?;
+        // Multicast the message to all nodes
+        for node_addr in self.nodes.values() {
+            let node_addr = node_addr.clone(); // Clone the address
 
-        println!("Received response from server: {}", response);
+            match socket.send_to(request_message.as_bytes(), &node_addr).await {
+                Ok(_) => {
+                    println!("Request message sent to {}", node_addr);
+                }
+                Err(e) => {
+                    eprintln!("Failed to send message to {}: {:?}", node_addr, e);
+                }
+            }
+        }
+
+        // Buffer for receiving data
+        let mut buffer = [0u8; 1024];
+
+        // Now, listen for the first response that comes back from any node
+        let (size, addr) = socket.recv_from(&mut buffer).await?;
+        let response = String::from_utf8_lossy(&buffer[..size]);
+        if response == "OK" {
+            println!("request for service accepted from {}", addr);
+
+            let mut send_buffer= vec![0u8; self.chunk_size];
+
+            // Send the image in chunks
+            let mut chunk_index = 0;
+            let mut file = File::open(file_path.unwrap()).await?;
+
+            loop {
+                let n = file.read(&mut send_buffer).await?;
+                if n == 0 {
+                    break; // EOF reached
+                }
+                socket.send_to(&send_buffer[..n], &addr).await?;
+                println!("Sent chunk {} of size {}", chunk_index, n);
+                chunk_index += 1;
+            }
+
+            // Send end-of-image signal
+            socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
+            println!("End of image signal sent.");
+
+            // start receiving result
+            self.await_result(socket, addr).await;
+        }
+        
+
         Ok(())
+    }
+
+    async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) {
+        // Receive the steganography result (image with hidden content) from the server
+        let mut output_image_data = Vec::new();
+        let mut buffer: Vec<u8> = vec![0u8; self.chunk_size];
+        loop {
+            let (n, _addr) = socket.recv_from(&mut buffer).await.unwrap();
+            if _addr != sender {
+                // ignore packets from other senders
+                continue;
+            }
+            if &buffer[..n] == END_OF_TRANSMISSION.as_bytes() {
+                println!("End of transmission signal received.");
+                break;
+            }
+
+            output_image_data.extend_from_slice(&buffer[..n]);
+            println!("Received chunk of size {}", n);
+        }
+
+        // Write the received image with hidden data to a file
+        let mut output_image_file = File::create("files/received_with_hidden.png").await.unwrap();
+        output_image_file.write_all(&output_image_data).await.unwrap();
+        println!("Received image with hidden data saved as 'received_with_hidden.png'.");
+
+
+        // Extract the hidden image from the received image
+        server_decrypt_img("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await;
+        println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'.");
     }
 }
