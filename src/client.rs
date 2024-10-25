@@ -40,7 +40,7 @@ impl Client {
     }
 
     /// and waits for the server's response.
-    pub async fn send_data(&self, file_path: Option<&Path>) -> Result<(), Box<dyn Error>> {
+    pub async fn send_data(&self, file_path: &str) -> Result<(), Box<dyn Error>> {
         
         // Create a UDP socket for sending and receiving messages
         let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
@@ -74,7 +74,7 @@ impl Client {
 
             // Send the image in chunks
             let mut chunk_index = 0;
-            let mut file = File::open(file_path.unwrap()).await?;
+            let mut file = File::open(file_path).await?;
 
             loop {
                 let n = file.read(&mut send_buffer).await?;
@@ -120,7 +120,7 @@ impl Client {
         // Write the received image with hidden data to a file
         let mut output_image_file = File::create("files/received_with_hidden.png").await.unwrap();
         output_image_file.write_all(&output_image_data).await.unwrap();
-        println!("Received image with hidden data saved as 'received_with_hidden.png'.");
+        println!("Received image with hidden data saved as 'files/received_with_hidden.png'.");
 
 
         // Extract the hidden image from the received image

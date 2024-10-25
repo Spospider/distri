@@ -11,35 +11,11 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 
 
-fn mock_encrypt_callback() -> Arc<Mutex<dyn Fn(Vec<u8>) -> Vec<u8> + Send + 'static>> {
-    Arc::new(Mutex::new(move |data: Vec<u8>| -> Vec<u8> {
-        let img_path = "files/to_encrypt.jpg";
-        let output_path = "files/encrypted_output.jpg";
-
-        tokio::runtime::Handle::current().block_on(async move {
-            // Step 1: Write data bytes to a file (e.g., 'to_encrypt.png')
-            let mut file = File::create(img_path).await.unwrap();
-            file.write_all(&data).await.unwrap();
-
-            // Step 2: Call `server_encrypt_img` to perform encryption on the file
-            server_encrypt_img("files/placeholder.jpg", img_path, output_path).await;
-
-            // Step 3: Read the encrypted output file as bytes
-            let mut encrypted_file = File::open(output_path).await.unwrap();
-            let mut encrypted_data = Vec::new();
-            encrypted_file.read_to_end(&mut encrypted_data).await.unwrap();
-
-            // Return the encrypted data as the output
-            encrypted_data
-        })
-    }))
-}
 
 #[tokio::test]
 async fn test_send_data_to_servers() {
     // Test Setup:
     // Create two server nodes: one elected, one not elected.
-    let callback = mock_encrypt_callback();
 
     let server_addr1: SocketAddr = "127.0.0.1:8081".parse().unwrap();
     let server_addr2: SocketAddr = "127.0.0.1:8082".parse().unwrap();
@@ -52,11 +28,11 @@ async fn test_send_data_to_servers() {
     let chunk_size:usize = 1024;
 
     // Server 1 (elected = true)
-    let server1 = CloudNode::new(callback.clone(), server_addr1, None, chunk_size, true).await.unwrap();
+    let server1 = CloudNode::new( server_addr1, None, chunk_size, true).await.unwrap();
     let server1_arc = Arc::new(server1);
 
     // Server 2 (elected = false)
-    let server2 = CloudNode::new(callback.clone(), server_addr2, None, chunk_size, false).await.unwrap();
+    let server2 = CloudNode::new( server_addr2, None, chunk_size, false).await.unwrap();
     let server2_arc = Arc::new(server2);
 
     // Spawn the server tasks
