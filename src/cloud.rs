@@ -197,7 +197,7 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use std::io::Result;
 use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img};
-use rand::random;
+// use rand::random;
 
 #[derive(Clone)]
 pub struct NodeInfo {
@@ -267,9 +267,23 @@ impl CloudNode {
             self.elect_leader().await; // Elect a leader based on mem and id values
         }
 
-        // UDP processing loop (from the previous code) would go here...
+        let mut buffer = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
+        loop {
+            let (size, addr) = self.public_socket.recv_from(&mut buffer).await?;
+             // Clone buffer data to process it in a separate task
+            let packet = buffer[..size].to_vec();
+            let node = self.clone();
+             tokio::spawn(async move {
+                let elected = *node.elected.lock().await;
+                if elected {
+                    if let Err(e) = node.handle_connection(packet, size, addr).await {
+                        eprintln!("Error handling connection: {:?}", e);
+                    }
+                }
+            });
+        }
 
-        Ok(())
+        // Ok(())
     }
 
     /// Retrieves updated information from all nodes using TCP messages
@@ -283,7 +297,7 @@ impl CloudNode {
             if let Ok(mut stream) = TcpStream::connect(addr).await {
                 if stream.write_all(b"Request: Update").await.is_ok() {
                     let mut buffer = [0u8; 1024];
-                    if let Ok(size) = stream.read(&mut buffer).await {
+                    if let Ok(_size) = stream.read(&mut buffer).await {
                         let updated_mem = buffer[0];
 
                         let mut nodes = self.nodes.lock().await;
