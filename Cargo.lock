@@ -301,6 +301,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "image 0.25.4",
+ "rand",
  "sha2",
  "steganography",
  "tokio",
