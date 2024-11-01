@@ -2,22 +2,32 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::collections::HashMap;
+// use std::os::unix::net::SocketAddr;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use std::io::Result;
+use std::time::{Duration, Instant};
 use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img};
-use std::future::Future;
-use std::pin::Pin;
 
 pub struct CloudNode {
     nodes: Arc<Mutex<HashMap<String, SocketAddr>>>,  // Keeps track of other cloud nodes
     public_socket: Arc<UdpSocket>,
-    chunk_size: usize,
+    // internal_socket: Arc<UdpSocket>,
     // Async callback that now returns a future
     // callback: Callback,
     elected: bool,
+    failed: bool,
+
+    // For stats
+    accepted:Arc<Mutex<u32>>,
+    completed:Arc<Mutex<u32>>,
+    failed_number_of_times:Arc<Mutex<u32>>,
+    failures:Arc<Mutex<u32>>,
+    total_task_time:Arc<Mutex<Duration>>,
+    
 }
 
 impl CloudNode {
@@ -26,18 +36,28 @@ impl CloudNode {
         // callback: impl Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = Vec<u8>> + Send>> + Send + Sync + 'static,
         address: SocketAddr,
         nodes: Option<HashMap<String, SocketAddr>>,
-        chunk_size: usize,
         elected: bool,
     ) -> Result<Self> {
         let initial_nodes = nodes.unwrap_or_else(HashMap::new);
         let socket = UdpSocket::bind(address).await?;
 
+        // (address: SocketAddr)use address ip only as str here
+        // let internal_socket: SocketAddr = format!("{}:{}", address.ip().to_string(), 4444).parse().unwrap();
+
         Ok(CloudNode {
             nodes: Arc::new(Mutex::new(initial_nodes)),
             public_socket: Arc::new(socket),
-            chunk_size,
             // callback: Arc::new(callback),
             elected,
+            // internal_socket: Arc::new(UdpSocket::bind(internal_socket).await?),
+            failed:false,
+
+            // Stats init
+            accepted: Arc::new(Mutex::new(0)),
+            completed: Arc::new(Mutex::new(0)),
+            failed_number_of_times: Arc::new(Mutex::new(0)),
+            failures: Arc::new(Mutex::new(0)),
+            total_task_time: Arc::new(Mutex::new(Duration::default())),
         })
     }
     /// Starts the server, listens for new connections, and processes data
@@ -52,13 +72,33 @@ impl CloudNode {
             let packet = buffer[..size].to_vec();
             let node = self.clone();
 
-            if self.elected {
+            //  to check different services
+            let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&packet[..size]);
+
+            if (self.elected && !self.failed) || received_msg == "Request: Stats" { // accept stats request always
+                // self.accepted += 1;
+                // self.accepted.fetch_add(1, Ordering::SeqCst);
+                *self.accepted.lock().await += 1;
+
                 // Spawn a task to handle the connection and data processing
+                let node_clone = Arc::clone(&node);  // an alternative to using self, to not cause ownership errors
                 tokio::spawn(async move {
+                    let start_time = Instant::now(); // Record start time
                     if let Err(e) = node.handle_connection(packet, size, addr).await {
                         eprintln!("Error handling connection: {:?}", e);
+                        
+                        *node_clone.failures.lock().await += 1; // how to make this not cause an error
                     }
+                    else{
+                        let elapsed = start_time.elapsed();
+
+                        // Accumulate the elapsed time into total_task_time
+                        *node_clone.total_task_time.lock().await += elapsed;
+                    }
+
+                     
                 });
+                
             }
         }
     }
@@ -117,8 +157,57 @@ impl CloudNode {
             }
             socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
             println!("Task for client done: {}", addr);
+            *self.completed.lock().await += 1;
         }
+        else if received_msg == "Request: Stats" {
+            //send a report of the stats for vars:
+                // accepted:Arc<Mutex<u32>>,
+                // completed:Arc<Mutex<u32>>,
+                // failed_number_of_times:Arc<Mutex<u32>>,
+                // failures:Arc<Mutex<u32>>,
+                // total_task_time:Arc<Mutex<Duration>>,
+            // back to the client in a human readable format
+            println!("Processing stats request from client: {}", addr);
 
+            // Establish a connection to the client for sending responses
+            let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
+        
+            // Lock and retrieve values from the shared stats variables
+            let accepted = *self.accepted.lock().await;
+            let completed = *self.completed.lock().await;
+            let failed_times = *self.failed_number_of_times.lock().await;
+            let failures = *self.failures.lock().await;
+            let total_time = *self.total_task_time.lock().await;
+        
+            // Calculate the average task completion time if there are any completed tasks
+            let avg_completion_time = if completed > 0 {
+                total_time / completed as u32
+            } else {
+                Duration::from_secs(0)
+            };
+        
+            // Create a human-readable stats report
+            let stats_report = format!(
+                "Server Stats:\n\
+                Accepted Requests: {}\n\
+                Completed Tasks: {}\n\
+                Failed Attempts: {}\n\
+                Failures: {}\n\
+                Total Task Time: {:.2?}\n\
+                Avg Completion Time: {:.2?}\n",
+                accepted,
+                completed,
+                failed_times,
+                failures,
+                total_time,
+                avg_completion_time,
+            );
+        
+            // Send the stats report back to the client
+            socket.send_to(stats_report.as_bytes(), &addr).await?;
+            println!("Sent stats report to client {}", addr);
+        
+        }
         Ok(())
     }
 
