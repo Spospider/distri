@@ -5,14 +5,18 @@ use steganography::util::*;
 use base64;
 use std::error::Error;
 use tokio::net::UdpSocket;
-use tokio::time::{sleep, Duration, timeout};
+use tokio::time::{sleep, timeout};
 use std::net::SocketAddr;
 use std::io;
+use std::collections::HashSet;
+use std::time::Duration;
+
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
 pub const DEFAULT_TIMEOUT: u64 = 10; // in seconds
 pub const RETRY_INTERVAL: u64 = 1; // in seconds
+pub const ACK: &[u8] = b"ACK";
 
 
 // Server encrypt: hides second image inside the first image
@@ -88,43 +92,80 @@ async fn read_from_img(img_path: &str) -> String {
 /// 
 /// # Returns
 /// * `Result<(), std::io::Error>` - Returns `Ok(())` on success, or an error after all retries fail.
-pub async fn send_with_retry(socket: &UdpSocket, message: &[u8], addr: SocketAddr, max_retries: u8) -> Result<(), std::io::Error> {
+pub async fn send_with_retry(
+    socket: &UdpSocket,
+    message: &[u8],
+    addr: SocketAddr,
+    packet_id: u64,
+    max_retries: u8,
+) -> Result<(), io::Error> {
     let mut attempts = 0;
+    let mut ack_buffer = [0u8; 16]; // Buffer for receiving ACKs
+
     while attempts < max_retries {
         attempts += 1;
-        
-        match socket.send_to(message, addr).await {
+
+        // Prepare the packet with the packet ID
+        let mut packet = packet_id.to_be_bytes().to_vec();
+        packet.extend_from_slice(message);
+
+        match socket.send_to(&packet, addr).await {
             Ok(_) => {
-                // Successfully sent the message
-                // println!("Successfully sent message to {} on attempt {}", addr, attempts);
-                return Ok(());
+                // Wait for an acknowledgment within a timeout
+                match timeout(Duration::from_millis(500), socket.recv_from(&mut ack_buffer)).await {
+                    Ok(Ok((size, _))) if &ack_buffer[..size] == ACK => {
+                        // ACK received, exit function successfully
+                        return Ok(());
+                    },
+                    _ => {
+                        // No ACK received within timeout
+                        eprintln!("Attempt {}/{}: ACK not received, retrying...", attempts, max_retries);
+                    }
+                }
             },
             Err(e) => {
                 eprintln!("Failed to send message to {}: {:?} (attempt {}/{})", addr, e, attempts, max_retries);
-                if attempts < max_retries {
-                    // Wait a bit before retrying
-                    sleep(Duration::from_secs(RETRY_INTERVAL)).await;
-                } else {
-                    // Exhausted retries, return the error
-                    return Err(e);
-                }
             },
         }
+
+        if attempts < max_retries {
+            // Wait a bit before retrying
+            sleep(Duration::from_millis(100)).await;
+        } else {
+            // Exhausted retries, return an error
+            return Err(io::Error::new(io::ErrorKind::Other, "Failed to send message after retries"));
+        }
     }
-    // If all retries are exhausted, return an error (this should be unreachable)
-    Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to send message after retries"))
+    Err(io::Error::new(io::ErrorKind::Other, "Failed to send message after retries"))
 }
 
 
-pub async fn recv_with_timeout(
+
+pub async fn recv_with_ack(
     socket: &UdpSocket,
     buffer: &mut [u8],
-    timeout_duration: Duration,
-) -> Result<(usize, SocketAddr), io::Error> {
-    // Use `timeout` to limit the time we wait for `recv_from`
-    match timeout(timeout_duration, socket.recv_from(buffer)).await {
-        Ok(Ok((size, addr))) => Ok((size, addr)), // Successfully received data within timeout
-        Ok(Err(e)) => Err(e),                      // Error from `recv_from`
-        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "recv_from timed out")), // Timeout error
+    processed_ids: &mut HashSet<u64>, // Track processed packet IDs to avoid duplicates
+) -> Result<(usize, SocketAddr, u64), io::Error> {
+    // Receive the packet with a timeout
+    let (size, addr) = socket.recv_from(buffer).await?;
+    if size < 8 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Packet too small"));
     }
+
+    // Extract packet ID from the packet
+    let packet_id = u64::from_be_bytes(buffer[..8].try_into().unwrap());
+
+    // Check if the packet ID has already been processed
+    if processed_ids.contains(&packet_id) {
+        // If duplicate, still send an ACK but skip processing
+        socket.send_to(ACK, addr).await?;
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Duplicate packet"));
+    }
+
+    // Mark packet ID as processed and send an ACK
+    processed_ids.insert(packet_id);
+    socket.send_to(ACK, addr).await?;
+
+    // Return the packet data for processing
+    Ok((size - 8, addr, packet_id))
 }
