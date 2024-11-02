@@ -3,11 +3,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::error::Error;
 use tokio::fs::File;
-use crate::utils::{END_OF_TRANSMISSION, DEFAULT_TIMEOUT, server_decrypt_img, send_with_retry, recv_with_timeout};
+use crate::utils::{END_OF_TRANSMISSION, DEFAULT_TIMEOUT, server_decrypt_img, send_with_retry, recv_with_ack};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Duration;
-
-
+use std::collections::HashSet;
 
 pub struct Client {
     nodes: HashMap<String, SocketAddr>,  // Keeps track of server nodes
@@ -40,89 +39,73 @@ impl Client {
         self.nodes.insert(name, address);
     }
 
-    pub async fn send_data(&self, file_path: &str, service:&str) -> Result<(), Box<dyn Error>> {
-        
+    pub async fn send_data(&self, file_path: &str, service: &str) -> Result<(), Box<dyn Error>> {
         // Create a UDP socket for sending and receiving messages
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
         
-        let request_message = format!("Request: {}", service); // The message to be sent
+        let request_message = format!("Request: {}", service);
 
-        // Multicast the message to all nodes
-        for node_addr in self.nodes.values() {
-            let node_addr = node_addr.clone(); // Clone the address
-            println!("sending request to  {}", node_addr);
+        // Send the request to each node
+        for &node_addr in self.nodes.values() {
+            println!("Sending request to {}", node_addr);
 
-            // match socket.send_to(request_message.as_bytes(), &node_addr).await {
-            match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
-                Ok(_) => {
-                    println!("Request message sent to {}", node_addr);
-                }
-                Err(e) => {
-                    // this doesnt
-                    eprintln!("Failed to send message to {}: {:?}", node_addr, e);
-                }
+            if let Err(e) = send_with_retry(&socket, request_message.as_bytes(), node_addr, 5, 5).await {
+                eprintln!("Failed to send message to {}: {:?}", node_addr, e);
+            } else {
+                println!("Request message sent to {}", node_addr);
             }
         }
 
         // Buffer for receiving data
         let mut buffer = [0u8; 1024];
 
-        // Now, listen for the first response that comes back from any node
-        // let (size, addr) = socket.recv_from(&mut buffer).await?;
-        let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+        // Listen for the first response that comes back from any node
+        let (size, addr, _packet_id) = recv_with_ack(&socket, &mut buffer, &mut HashSet::new()).await?;
 
         let response = String::from_utf8_lossy(&buffer[..size]);
         if response == "OK" {
-            println!("request for service accepted from {}", addr);
+            println!("Service request accepted by {}", addr);
 
-            let mut send_buffer= vec![0u8; self.chunk_size];
-
-            // Send the image in chunks
-            let mut chunk_index = 0;
+            // Prepare to send the file in chunks
             let mut file = File::open(file_path).await?;
+            let mut send_buffer = vec![0u8; self.chunk_size];
+            let mut chunk_index = 0;
 
             loop {
                 let n = file.read(&mut send_buffer).await?;
                 if n == 0 {
-                    break; // EOF reached
+                    break; // End of file reached
                 }
-                // socket.send_to(&send_buffer[..n], &addr).await?;
-                send_with_retry(&socket, &send_buffer[..n], addr, 5).await?;
+
+                // Send each chunk with retry logic
+                send_with_retry(&socket, &send_buffer[..n], addr, chunk_index as u64, 5).await?;
                 println!("Sent chunk {} of size {}", chunk_index, n);
                 chunk_index += 1;
             }
 
-            // Send end-of-image signal
-            // socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
-            send_with_retry(&socket, END_OF_TRANSMISSION.as_bytes(), addr, 5).await?;
+            // Send end-of-transmission signal
+            send_with_retry(&socket, END_OF_TRANSMISSION.as_bytes(), addr, chunk_index as u64, 5).await?;
             println!("End of image signal sent.");
 
-            // start receiving result
-            self.await_result(socket, addr).await;
+            // Start receiving result
+            self.await_result(socket, addr).await?;
         }
-        
 
         Ok(())
     }
 
-
     pub async fn collect_stats(&self) -> Result<(), Box<dyn Error>> {
         // Create a UDP socket
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
         
-        let request_message = "Request: Stats"; // Message to send for collecting stats
+        let request_message = "Request: Stats";
 
-        // Send the request message to all nodes
-        for node_addr in self.nodes.values() {
-            let node_addr = node_addr.clone(); // Clone the address
-            // match socket.send_to(request_message.as_bytes(), &node_addr).await {
-            match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
-                Ok(_) => {
-                    println!("Stats request sent to {}", node_addr);
-                }
-                Err(e) => {
-                    eprintln!("Failed to send stats request to {}: {:?}", node_addr, e);
-                }
+        // Send the request to all nodes
+        for &node_addr in self.nodes.values() {
+            if let Err(e) = send_with_retry(&socket, request_message.as_bytes(), node_addr, 5, 5).await {
+                eprintln!("Failed to send stats request to {}: {:?}", node_addr, e);
+            } else {
+                println!("Stats request sent to {}", node_addr);
             }
         }
 
@@ -131,9 +114,7 @@ impl Client {
 
         // Loop to collect and print responses from each server
         for _ in 0..self.nodes.len() {
-            // let (size, addr) = socket.recv_from(&mut buffer).await?;
-
-            let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+            let (size, addr, _packet_id) = recv_with_ack(&socket, &mut buffer, &mut HashSet::new()).await?;
             let response = String::from_utf8_lossy(&buffer[..size]);
             println!("Received response from {}: {}", addr, response);
         }
@@ -141,17 +122,15 @@ impl Client {
         Ok(())
     }
 
-
-    async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) {
+    async fn await_result(&self, socket: UdpSocket, sender: SocketAddr) -> Result<(), Box<dyn Error>> {
         // Receive the steganography result (image with hidden content) from the server
         let mut output_image_data = Vec::new();
-        let mut buffer: Vec<u8> = vec![0u8; self.chunk_size];
+        let mut buffer = vec![0u8; self.chunk_size];
+        
         loop {
-            // let (n, _addr) = socket.recv_from(&mut buffer).await.unwrap();
-            let (n, _addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await.unwrap();
-            if _addr != sender {
-                // ignore packets from other senders
-                continue;
+            let (n, addr, _packet_id) = recv_with_ack(&socket, &mut buffer, &mut HashSet::new()).await?;
+            if addr != sender {
+                continue; // Ignore packets from other senders
             }
             if &buffer[..n] == END_OF_TRANSMISSION.as_bytes() {
                 println!("End of transmission signal received.");
@@ -162,34 +141,20 @@ impl Client {
             println!("Received chunk of size {}", n);
         }
 
-        // Write the received image with hidden data to a file
-        // let mut output_image_file = File::create("files/received_with_hidden.png").await.unwrap();
-        // output_image_file.write_all(&output_image_data).await.unwrap();
-        // println!("Received image with hidden data saved as 'files/received_with_hidden.png'.");
-        match File::create("files/received_with_hidden.png").await {
-            Ok(mut output_image_file) => {
-                if let Err(e) = output_image_file.write_all(&output_image_data).await {
-                    eprintln!("Failed to write received image with hidden data to file: {}", e);
-                } else {
-                    println!("Received image with hidden data saved as 'files/received_with_hidden.png'.");
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to create file for received image with hidden data: {}", e);
-            }
+        // Save the received image with hidden data to a file
+        let output_path = "files/received_with_hidden.png";
+        if let Err(e) = File::create(output_path).await?.write_all(&output_image_data).await {
+            eprintln!("Failed to write received image with hidden data to file: {}", e);
+        } else {
+            println!("Received image with hidden data saved as '{}'.", output_path);
         }
-
 
         // Extract the hidden image from the received image
-        // server_decrypt_img("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await;
-        // println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'.");
-        match server_decrypt_img("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await {
-            Ok(_) => {
-                println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'.");
-            }
-            Err(e) => {
-                eprintln!("Failed to extract hidden image: {}", e);
-            }
+        match server_decrypt_img(output_path, "files/extracted_hidden_image.jpg").await {
+            Ok(_) => println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'."),
+            Err(e) => eprintln!("Failed to extract hidden image: {}", e),
         }
+
+        Ok(())
     }
 }
