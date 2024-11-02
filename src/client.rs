@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::error::Error;
 use tokio::fs::File;
-use crate::utils::{END_OF_TRANSMISSION, DEFAULT_TIMEOUT, server_decrypt_img, send_with_retry, recv_with_timeout};
+use crate::utils::{END_OF_TRANSMISSION, DEFAULT_TIMEOUT, server_decrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Duration;
 
@@ -75,27 +75,30 @@ impl Client {
         if response == "OK" {
             println!("request for service accepted from {}", addr);
 
-            let mut send_buffer= vec![0u8; self.chunk_size];
+            // let mut send_buffer= vec![0u8; self.chunk_size];
 
             // Send the image in chunks
-            let mut chunk_index = 0;
+            // let mut chunk_index = 0;
             let mut file = File::open(file_path).await?;
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).await?;
 
-            loop {
-                let n = file.read(&mut send_buffer).await?;
-                if n == 0 {
-                    break; // EOF reached
-                }
-                // socket.send_to(&send_buffer[..n], &addr).await?;
-                send_with_retry(&socket, &send_buffer[..n], addr, 5).await?;
-                println!("Sent chunk {} of size {}", chunk_index, n);
-                chunk_index += 1;
-            }
+            // loop {
+            //     let n = file.read(&mut send_buffer).await?;
+            //     if n == 0 {
+            //         break; // EOF reached
+            //     }
+            //     // socket.send_to(&send_buffer[..n], &addr).await?;
+            //     send_with_retry(&socket, &send_buffer[..n], addr, 5).await?;
+            //     println!("Sent chunk {} of size {}", chunk_index, n);
+            //     chunk_index += 1;
+            // }
+            send_reliable(&socket, &data, addr).await?;
 
             // Send end-of-image signal
             // socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
-            send_with_retry(&socket, END_OF_TRANSMISSION.as_bytes(), addr, 5).await?;
-            println!("End of image signal sent.");
+            // send_with_retry(&socket, END_OF_TRANSMISSION.as_bytes(), addr, 5).await?;
+            // println!("End of image signal sent.");
 
             // start receiving result
             self.await_result(socket, addr).await;
@@ -144,23 +147,25 @@ impl Client {
 
     async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) {
         // Receive the steganography result (image with hidden content) from the server
-        let mut output_image_data = Vec::new();
-        let mut buffer: Vec<u8> = vec![0u8; self.chunk_size];
-        loop {
-            // let (n, _addr) = socket.recv_from(&mut buffer).await.unwrap();
-            let (n, _addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await.unwrap();
-            if _addr != sender {
-                // ignore packets from other senders
-                continue;
-            }
-            if &buffer[..n] == END_OF_TRANSMISSION.as_bytes() {
-                println!("End of transmission signal received.");
-                break;
-            }
+        // let mut output_image_data = Vec::new();
+        // let mut buffer: Vec<u8> = vec![0u8; self.chunk_size];
+        let (output_image_data, n, _addr) = recv_reliable(&socket).await.unwrap(); // add sender to verify its from same
 
-            output_image_data.extend_from_slice(&buffer[..n]);
-            println!("Received chunk of size {}", n);
-        }
+        // loop {
+        //     // let (n, _addr) = socket.recv_from(&mut buffer).await.unwrap();
+        //     let (n, _addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await.unwrap();
+        //     if _addr != sender {
+        //         // ignore packets from other senders
+        //         continue;
+        //     }
+        //     if &buffer[..n] == END_OF_TRANSMISSION.as_bytes() {
+        //         println!("End of transmission signal received.");
+        //         break;
+        //     }
+
+        //     output_image_data.extend_from_slice(&buffer[..n]);
+        //     println!("Received chunk of size {}", n);
+        // }
 
         // Write the received image with hidden data to a file
         // let mut output_image_file = File::create("files/received_with_hidden.png").await.unwrap();

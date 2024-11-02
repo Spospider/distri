@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use std::io::Result;
 use std::time::{Duration, Instant};
-use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout};
+use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable};
 use rand::Rng; 
 
 
@@ -340,36 +340,40 @@ impl CloudNode {
             println!("Sent 'OK' message to {}", addr);
 
             // Buffer to receive chunks of data
-            let mut buffer = [0u8; 1024];
-            let mut aggregated_data = Vec::new(); // Aggregate the incoming data
+            // let mut buffer = [0u8; 1024];
+            // let mut aggregated_data = Vec::new(); // Aggregate the incoming data
+
+            let (aggregated_data, _, _) = recv_reliable(&socket).await?;
 
             // Receive data in chunks from the client
-            loop {
-                // let (size, _) = socket.recv_from(&mut buffer).await?;
-                let (size, _) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+            // loop {
+            //     // let (size, _) = socket.recv_from(&mut buffer).await?;
+            //     let (size, _) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
                 
-                let received_data = String::from_utf8_lossy(&buffer[..size]);
+            //     let received_data = String::from_utf8_lossy(&buffer[..size]);
 
-                // Check for the end of transmission message
-                if received_data == END_OF_TRANSMISSION {
-                    println!("End of transmission from client {}", addr);
-                    break;
-                }
-                // Append the received chunk to the aggregated_data buffer
-                aggregated_data.extend_from_slice(&buffer[..size]);
-                println!("Received chunk from {}: {} bytes", addr, size);
-            }
+            //     // Check for the end of transmission message
+            //     if received_data == END_OF_TRANSMISSION {
+            //         println!("End of transmission from client {}", addr);
+            //         break;
+            //     }
+            //     // Append the received chunk to the aggregated_data buffer
+            //     aggregated_data.extend_from_slice(&buffer[..size]);
+            //     println!("Received chunk from {}: {} bytes", addr, size);
+            // }
 
             // Process the aggregated data
             let processed_data = self.process(aggregated_data).await;
 
+            send_reliable(&socket, &processed_data, addr).await?;
+
             // Send the processed data back to the client in chunks
-            let chunk_size = 1024; // Define chunk size for sending the response
-            for chunk in processed_data.chunks(chunk_size) {
-                // socket.send_to(chunk, &addr).await?;
-                send_with_retry(&socket, chunk, addr, 5).await?;
-                println!("Sent chunk of {} bytes back to {}", chunk.len(), addr);
-            }
+            // let chunk_size = 1024; // Define chunk size for sending the response
+            // for chunk in processed_data.chunks(chunk_size) {
+            //     // socket.send_to(chunk, &addr).await?;
+            //     send_with_retry(&socket, chunk, addr, 5).await?;
+            //     println!("Sent chunk of {} bytes back to {}", chunk.len(), addr);
+            // }
             socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
             println!("Task for client done: {}", addr);
             *self.completed.lock().await += 1;
@@ -384,7 +388,7 @@ impl CloudNode {
             let accepted = *self.accepted.lock().await;
             let completed = *self.completed.lock().await;
             let failed_times = *self.failed_number_of_times.lock().await;
-            let failures = *self.failures.lock().await;
+            // let failures = *self.failures.lock().await;
             let total_time = *self.total_task_time.lock().await;
         
             // Calculate the average task completion time if there are any completed tasks
@@ -400,13 +404,12 @@ impl CloudNode {
                 Accepted Requests: {}\n\
                 Completed Tasks: {}\n\
                 Failed Attempts: {}\n\
-                Failures: {}\n\
                 Total Task Time: {:.2?}\n\
                 Avg Completion Time: {:.2?}\n",
                 accepted,
                 completed,
                 failed_times,
-                failures,
+                // failures,
                 total_time,
                 avg_completion_time,
             );
