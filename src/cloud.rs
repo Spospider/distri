@@ -269,8 +269,8 @@ impl CloudNode {
         // TODO calc new mem
         // self.mem = current mem usage
 
-
-        let response = format!("{} {}", self.mem.lock().await, self.id.lock().await);
+        let load = self.completed.lock().await.clone() - self.accepted.lock().await.clone(); // order is reversedd as the min value is selected
+        let response = format!("{} {}", load, self.id.lock().await); // self.mem.lock().await
         let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
 
         // Send the response back to the requesting node
