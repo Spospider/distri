@@ -191,7 +191,6 @@ use tokio::net::{UdpSocket, TcpStream, TcpListener};
 use tokio::sync::Mutex;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::collections::HashMap;
 // use std::os::unix::net::SocketAddr;
@@ -200,12 +199,13 @@ use std::net::SocketAddr;
 use std::io::Result;
 use std::time::{Duration, Instant};
 use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img};
+use rand::Rng; 
 
 
 #[derive(Clone)]
 pub struct NodeInfo {
-    pub mem: u8,
-    pub id: u8,
+    pub mem: u16,
+    pub id: u16,
     pub addr: SocketAddr,
 }
 
@@ -213,11 +213,11 @@ pub struct NodeInfo {
 pub struct CloudNode {
     nodes: Arc<Mutex<HashMap<String, NodeInfo>>>,  // Keeps track of other cloud nodes
     public_socket: Arc<UdpSocket>,
-    chunk_size: usize,
-    elected: Mutex<bool>,   // Elected state wrapped in Mutex for safe mutable access
-    failed: Mutex<bool>,
-    mem: u8,
-    id: u8,
+    chunk_size: Arc<usize>,
+    elected: Arc<Mutex<bool>>,   // Elected state wrapped in Mutex for safe mutable access
+    failed: Arc<Mutex<bool>>,
+    mem: Arc<Mutex<u16>>,
+    id: Arc<Mutex<u16>>, // is the port of the addr, server ports have to be unique
     // internal_socket: Arc<UdpSocket>,
     
     // For stats
@@ -233,13 +233,28 @@ impl CloudNode {
     /// Creates a new CloudNode
     pub async fn new(
         address: SocketAddr,
-        nodes: Option<HashMap<String, NodeInfo>>,
+        nodes: Option<HashMap<String, SocketAddr>>,
         chunk_size: usize,
         elected: bool,
-        mem: u8,
-        id: u8,
     ) -> Result<Arc<Self>> {
-        let initial_nodes = nodes.unwrap_or_else(HashMap::new);
+        // let initial_nodes = nodes.unwrap_or_else(HashMap::new);
+        let initial_nodes: HashMap<String, NodeInfo> = nodes
+            .unwrap_or_else(HashMap::new)
+            .into_iter()
+            .map(|(name, addr)| {
+                // Create NodeInfo for each node with the given addr, mem, and id
+                (
+                    name,
+                    NodeInfo {
+                        mem:0,
+                        id:addr.port(),
+                        addr,
+                    },
+                )
+            })
+            .collect();
+        // initialize initial_nodes as Arc<Mutex<HashMap<String, NodeInfo>>> from  nodes: Option<HashMap<String, SocketAddr>> 
+        
         let socket = UdpSocket::bind(address).await?;
         let failed = false;
       
@@ -250,11 +265,11 @@ impl CloudNode {
         Ok(Arc::new(CloudNode {
             nodes: Arc::new(Mutex::new(initial_nodes)),
             public_socket: Arc::new(socket),
-            chunk_size,
-            elected: Mutex::new(elected),
-            failed: Mutex::new(failed),
-            mem,
-            id,
+            chunk_size:Arc::new(chunk_size),
+            elected: Arc::new(Mutex::new(elected)),
+            failed: Arc::new(Mutex::new(failed)),
+            mem: Arc::new(Mutex::new(0)),
+            id: Arc::new(Mutex::new(address.port())),
           
             // Stats init
             accepted: Arc::new(Mutex::new(0)),
@@ -266,33 +281,14 @@ impl CloudNode {
     }
 
     /// Starts the server to listen for incoming requests, elect a leader, and process data
-    pub async fn serve(self: Arc<Self>) -> Result<()> {
+    pub async fn serve(self: &Arc<Self>) -> Result<()> {
         // Set up the TCP listener to listen for incoming TCP connections
         let listener = TcpListener::bind(self.public_socket.local_addr()?).await?;
         println!("Listening for incoming info requests on {:?}", listener.local_addr());
 
-//         // Spawn a task to handle incoming TCP connections separately
-//         let node = self.clone();
-//         tokio::spawn(async move {
-//             loop {
-//                 if let Ok((socket, addr)) = listener.accept().await {
-//                     let node_clone = node.clone();
-//                     tokio::spawn(async move {
-//                         if let Err(e) = node_clone.handle_info_request(socket, addr).await {
-//                             eprintln!("Failed to handle info request from {}: {:?}", addr, e);
-//                         }
-//                     });
-//                 }
-//             }
-//         });
 
         // Initial leader election and info retrieval
-        {
-            let mut elected = self.elected.lock().await;
-            *elected = false; // Reset election state initially
-            self.get_info().await; // Retrieve updated info from all nodes
-            self.elect_leader().await; // Elect a leader based on mem and id values
-        }
+        self.elect_leader().await;
 
         let mut buffer = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
         loop {
@@ -301,13 +297,43 @@ impl CloudNode {
             let packet = buffer[..size].to_vec();
             let node = self.clone();
 
+            let random_value = rand::thread_rng().gen_range(1..=10);
+
+            // If the random value is 0, do something
+            if random_value == 0 || *self.failed.lock().await  {  // start failure election
+                let mut failed = self.failed.lock().await;
+                *failed = false; // Reset election state initially
+                self.get_info().await; // Retrieve updated info from all nodes
+                *failed = self.election_alg().await; // Elect a node to fail
+                if *failed {
+                    println!("Node {} with is now failed.", self.public_socket.local_addr()?);
+                }
+            }
+            
+            // while failed do nothing at all
+            if *self.failed.lock().await {
+
+                let random_value = rand::thread_rng().gen_range(0..=10);
+                if random_value == 0 {
+                    println!("Node {} is back up from failure.", self.public_socket.local_addr()?);
+                    let mut failed = self.failed.lock().await;
+                    *failed = false;
+                }
+                else {
+                    // stay failed
+                    continue;
+                }
+            }
+
+            // perform election
+            self.elect_leader().await;
 
             //  to check different services
             let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&packet[..size]);
           
             if received_msg == "Request: Stats" || received_msg == "Request: Encrypt"  {
 
-                if (self.elected.lock().await; && !self.failed.lock().await;) || received_msg == "Request: Stats" { // accept stats request always
+                if *self.elected.lock().await || received_msg == "Request: Stats" { // accept stats request always
                     // self.accepted += 1;
                     // self.accepted.fetch_add(1, Ordering::SeqCst);
                     *self.accepted.lock().await += 1;
@@ -331,123 +357,116 @@ impl CloudNode {
                     });
                 }
             }
-          else if received_msg == "Request: Info" {
-             // TODO process info request here instead
-          }
+            else if received_msg == "Request: UpdateInfo" {
+                
+                tokio::spawn(async move {
+                    if let Err(e) = node.handle_info_request(addr).await {
+                        eprintln!("Error handling info connection: {:?}", e);
+                    }
+                    println!("responded to getinfo")
+                    
+                });
+            }
         }
-        Ok(())
+        // Ok(())
     }
               
 
  // election stuff
     /// Retrieves updated information from all nodes using TCP messages
-    async fn get_info(&self) {
+    async fn get_info(self: &Arc<Self>) {
         let node_addresses: Vec<(String, SocketAddr)> = {
             let nodes = self.nodes.lock().await;
             nodes.iter().map(|(id, info)| (id.clone(), info.addr)).collect()
         };
-
+    
+        // Create a UDP socket
+        let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
+    
         for (node_id, addr) in node_addresses {
-          // TODO use UDP here
-            if let Ok(mut stream) = TcpStream::connect(addr).await {
-                if stream.write_all(b"Request: Update").await.is_ok() {
-                    let mut buffer = [0u8; 1024];
-                    if let Ok(_size) = stream.read(&mut buffer).await {
-                        let updated_mem = buffer[0];
-
-                        let mut nodes = self.nodes.lock().await;
-                        if let Some(node_info) = nodes.get_mut(&node_id) {
-                            node_info.mem = updated_mem;
-                            println!("Updated info for node {}: mem = {}", node_info.id, node_info.mem);
-                        }
+            let request_msg = "Request: UpdateInfo";
+            println!("sending getinfo to {}", addr);
+    
+            // Send the request to the node
+            socket.send_to(request_msg.as_bytes(), addr).await.expect("Failed to send request");
+    
+            // Buffer to hold the response
+            let mut buffer = [0u8; 1024];
+            
+            // Receive the response from the node
+            match socket.recv_from(&mut buffer).await {
+                Ok((size, _)) => {
+                    let updated_mem:u16 = buffer[..size].get(0).copied().unwrap_or(0).into();
+    
+                    let mut nodes = self.nodes.lock().await;
+                    if let Some(node_info) = nodes.get_mut(&node_id) {
+                        node_info.mem = updated_mem;
+                        println!("Updated info for node {}: mem = {}", node_info.id, node_info.mem);
                     }
+                },
+                Err(e) => {
+                    eprintln!("Failed to receive response from {}: {:?}", addr, e);
                 }
             }
         }
-        // let nodes = self.nodes.lock().await;
-
-        // for (_, node_info) in nodes.iter() {
-        //     let addr = node_info.addr;
-
-        //     // Try to connect to the node via TCP
-        //     if let Ok(mut stream) = TcpStream::connect(addr).await {
-        //         println!("Connected to node {}: {}", node_info.id, addr);
-
-        //         // Send a request message
-        //         if let Err(e) = stream.write_all(b"Request: UpdateInfo").await {
-        //             eprintln!("Failed to send update request to {}: {:?}", addr, e);
-        //             continue;
-        //         }
-
-        //         // Buffer to hold the response from the node
-        //         let mut response = [0u8; 1024];
-        //         let size = match stream.read(&mut response).await {
-        //             Ok(size) => size,
-        //             Err(e) => {
-        //                 eprintln!("Failed to read response from {}: {:?}", addr, e);
-        //                 continue;
-        //             }
-        //         };
-
-        //         // Process the response (assuming the node sends updated mem value as plain u8)
-        //         let updated_mem = response[0];
-        //         println!("Received updated mem from node {}: {}", node_info.id, updated_mem);
-
-        //         // Update the node's mem value
-        //         if let Some(node_info) = nodes.get_mut(&node_info.id.to_string()) {
-        //             node_info.mem = updated_mem;
-        //         }
-        //     } else {
-        //         eprintln!("Failed to connect to node {}: {}", node_info.id, addr);
-        //     }
-        // }
     }
 
     /// Handles incoming TCP requests for node information
-  // TODO use UDP here
-    async fn handle_info_request(&self, mut socket: TcpStream, addr: SocketAddr) -> Result<()> {
+    async fn handle_info_request(self: &Arc<Self>, addr: SocketAddr) -> Result<()> {
         println!("Received info request from {}", addr);
 
-        // Read the request message
-        let mut buffer = [0u8; 1024];
-        let size = socket.read(&mut buffer).await?;
-        let request_msg = String::from_utf8_lossy(&buffer[..size]);
+        // Serialize the current node info (mem and id) to respond
+        // TODO calc new mem
+        // self.mem = current mem usage
 
-        if request_msg == "Request: UpdateInfo" {
-            // Serialize the current node info (mem and id) to respond
-            let response = format!("{} {}", self.mem, self.id);
 
-            // Send the response back to the requesting node
-            socket.write_all(response.as_bytes()).await?;
-            println!("Sent info response to {}: {}", addr, response);
-        }
+        let response = format!("{} {}", self.mem.lock().await, self.id.lock().await);
+        let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
+
+        // Send the response back to the requesting node
+        socket.send_to(response.as_bytes(), addr).await?;
+        println!("Sent info response to {}: {}", addr, response);
 
         Ok(())
     }
 
     /// Elects the leader node based on the lowest mem value, breaking ties with the lowest id
-    async fn elect_leader(&self) {
+     
+    async fn elect_leader(self: &Arc<Self>) {
+        // let clone = self.clone();
+        let mut elected = self.elected.lock().await;
+        *elected = false; // Reset election state initially
+        self.get_info().await; // Retrieve updated info from all nodes
+        *elected = self.election_alg().await; // Elect a leader based on mem and id values
+        println!("elected value: {}", elected);
+    }
+
+    async fn election_alg(self: &Arc<Self>) -> bool {
         let nodes = self.nodes.lock().await;
-        let mut lowest_mem = self.mem;
-        let mut elected_node = self.id;
+        let mut lowest_mem = self.mem.lock().await;
+        let mut elected_node = self.id.lock().await;
 
         for (_, node_info) in nodes.iter() {
-            if node_info.mem < lowest_mem || (node_info.mem == lowest_mem && node_info.id < elected_node) {
-                lowest_mem = node_info.mem;
-                elected_node = node_info.id;
+            if node_info.mem < *lowest_mem || (node_info.mem == *lowest_mem && node_info.id < *elected_node) {
+                *lowest_mem = node_info.mem;
+                *elected_node = node_info.id;
             }
         }
 
-        let mut elected = self.elected.lock().await;
-        *elected = self.id == elected_node;
-        println!("Node {} is elected as leader: {} with mem={}", self.id, *elected, self.mem);
+        // let mut elected = self.elected.lock().await;
+        // *elected = self.id == elected_node;
+        let elected = *self.id.lock().await == *elected_node;
+        println!("elected node: {}", elected_node);
+        // println!("Node {} is elected as leader: {} with mem={}", self.id, *elected, self.mem);
+        return elected;
+        
     }
   
  // end election stuff
 
 
     /// Handle an incoming connection, aggregate the data, process it, and send a response
-    async fn handle_connection(self: Arc<Self>, data: Vec<u8>, size: usize, addr: SocketAddr) -> Result<()> {
+    async fn handle_connection(self: &Arc<Self>, data: Vec<u8>, size: usize, addr: SocketAddr) -> Result<()> {
         // Convert incoming bytes to a string to parse JSON
         let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&data[..size]);
 
@@ -497,13 +516,6 @@ impl CloudNode {
             *self.completed.lock().await += 1;
         }
         else if received_msg == "Request: Stats" {
-            //send a report of the stats for vars:
-                // accepted:Arc<Mutex<u32>>,
-                // completed:Arc<Mutex<u32>>,
-                // failed_number_of_times:Arc<Mutex<u32>>,
-                // failures:Arc<Mutex<u32>>,
-                // total_task_time:Arc<Mutex<Duration>>,
-            // back to the client in a human readable format
             println!("Processing stats request from client: {}", addr);
 
             // Establish a connection to the client for sending responses
@@ -543,7 +555,6 @@ impl CloudNode {
             // Send the stats report back to the client
             socket.send_to(stats_report.as_bytes(), &addr).await?;
             println!("Sent stats report to client {}", addr);
-        
         }
         Ok(())
     }

@@ -15,10 +15,3 @@ steganography = "1.0.2"
 tokio = { version = "1", features = ["full"] }
 rand = "0.8.4"
 
-[[bin]]
-name = "cloud"
-path = "src/cloud.rs"
-
-[[bin]]
-name = "client"
-path = "src/client.rs"

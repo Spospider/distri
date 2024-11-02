@@ -1,4 +1,4 @@
-use clap::{Arg, ArgGroup, Command, Parser, Subcommand}; 
+use clap::Parser; 
 use distri::client::Client;
 use distri::cloud::CloudNode;
 use std::collections::HashMap;
@@ -6,8 +6,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use std::collections::HashSet;
-
-
 
 #[derive(Parser, Debug)]
 struct Arguments {
@@ -21,49 +19,11 @@ struct Arguments {
     ips: Vec<String>,
 }
 
-
-
 #[tokio::main]
 async fn main() {
-    // let matches = Command::new("Distributed Test")
-    //     .arg(Arg::new("mode")
-    //         .required(true)
-    //         .help("Mode to run the program in: 'server' or 'client'")
-    //     )
-    //     .arg(Arg::new("identifier")
-    //         .required_if_eq("mode", "server")
-    //         .help("Unique identifier for the server node (only required in server mode)")
-    //     )
-    //     .arg(Arg::new("report")
-    //         .required(false)
-    //         .help("Optional flag for clients to gather and report stats at the end")
-    //     )
-    //     .arg(Arg::new("ips")
-    //         .help("First IP address (this will be the own address)")
-    //         .required(true)
-    //     )
-    //     .group(ArgGroup::new("ips_group")
-    //         .args(&["ips"])
-    //         .required(true)
-    //         .multiple(true)
-    //         // .help("Specify at least one other IP address")
-    //     )
-    //     .get_matches();
-    let mut args = Arguments::parse();
+    let args = Arguments::parse();
     
-
-    
-
-    // Determine mode (server or client)
     let mode = args.mode;
-    println!("mode: {}", mode);
-    // assign own_addr = other_ips[0] 
-    // let own_addr: SocketAddr = matches.get_one::<String>("ip_self").unwrap().parse().expect("Failed to parse own IP address");
-    // let other_ips: Vec<SocketAddr> = args.ips
-    //     .iter() // Create an iterator over the Vec<String>
-    //     .map(|ip| ip.parse().expect("Failed to parse an IP address")) // Parse each String to SocketAddr
-    //     .collect(); // Collect the results into a Vec<SocketAddr>
-    // remove duplicates!!
     let other_ips: Vec<SocketAddr> = args.ips
         .iter() // Create an iterator over the Vec<String>
         .cloned() // Clone each String (to avoid borrowing issues)
@@ -73,9 +33,6 @@ async fn main() {
         .collect(); // Collect the results into a Vec<SocketAddr>
 
     let own_addr:SocketAddr = args.ips[0].parse().expect("REASON");
-    println!("own_addr: {}", own_addr);
-
-
 
     match mode.as_str() {
         "server" => {
@@ -90,7 +47,7 @@ async fn main() {
             }
 
             // Create and start the server
-            let server = CloudNode::new(own_addr, Some(node_map), is_elected).await.unwrap();
+            let server = CloudNode::new(own_addr, Some(node_map), 1024, is_elected).await.unwrap();
             let server_arc = Arc::new(server);
             tokio::spawn(async move {
                 server_arc.serve().await.unwrap();
@@ -122,7 +79,7 @@ async fn main() {
             }
 
             // Load test: Send 10_000 requests
-            for _ in 0..2 {
+            for _ in 0..10 {
                 match client.send_data(file_path, "Encrypt").await {
                     Ok(_) => println!("Sent image: {}", file_path),
                     Err(e) => eprintln!("Failed to send image {}: {:?}", file_path, e),
@@ -142,6 +99,6 @@ async fn main() {
     }
 }
 
-// cargo run -- --mode server --identifier 10 --ips 127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3001
+// cargo run -- --mode server --identifier 10 --ips 127.0.0.1:3000,127.0.0.1:3001
 
-// cargo run -- --mode client --report true --ips 127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3001
+// cargo run -- --mode client --report true --ips 127.0.0.1:3000,127.0.0.1:3001
