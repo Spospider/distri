@@ -1,0 +1,11 @@
+# Ignore the target directory (build artifacts)
+target/
+example/target/
+
+# Ignore cargo.lock for version control
+Cargo.lock
+example/Cargo.lock
+
+# Ignore files related to Rust's build cache
+.cargo/
+example/.cargo/

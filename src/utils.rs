@@ -3,6 +3,7 @@ use steganography::encoder::*;
 use steganography::decoder::*;
 use steganography::util::*;
 use base64;
+use std::error::Error;
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
@@ -23,16 +24,28 @@ pub async fn server_encrypt_img(base_img_path: &str, img_to_hide_path: &str, out
 }
 
 // Server decrypt: extracts hidden image and saves it
-pub async fn server_decrypt_img(base_img_path: &str, output_hidden_img_path: &str) {
+pub async fn server_decrypt_img(base_img_path: &str, output_hidden_img_path: &str) -> Result<(), Box<dyn Error + 'static>> {
     // Extract the hidden message (base64-encoded image)
     let encoded_message = read_from_img(base_img_path).await;
-    print!("encoded_message: {}", encoded_message);
+    // print!("encoded_message: {}", encoded_message);
     // Decode the base64-encoded message back to image bytes
-    let decoded_img_bytes = base64::decode(&encoded_message).expect("Failed to decode base64");
-
+    let decoded_img_bytes = match base64::decode(&encoded_message) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("Failed to decode base64: {}", e);
+            return Err(Box::new(e));  // use a simple error here
+        }
+    };
     // Write the decoded image bytes to a new image file
-    let mut output_file = File::create(output_hidden_img_path).await.expect("Failed to create output image file");
+    let mut output_file = match File::create(output_hidden_img_path).await {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("Failed to create output image file: {}", e);
+            return Err(Box::new(e));  // Propagate the error
+        }
+    };
     output_file.write_all(&decoded_img_bytes).await.expect("Failed to write decoded image");
+    Ok(())
 }
 
 async fn write_to_img(message: &str, img_path: &str, output_path: &str) {

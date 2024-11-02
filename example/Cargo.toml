@@ -8,4 +8,4 @@ steganography = "1.0.2"
 tokio = { version = "1.41.0", features = ["full"] }
 distri = { path = "../" }  # Path to your custom library
 rand = { version = "0.8.5", features = ["std_rng"] }
-clap = { version = "4.5.20" }
+clap = {version = "4.5.9", features = ["derive"]}

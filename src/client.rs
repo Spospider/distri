@@ -154,13 +154,33 @@ impl Client {
         }
 
         // Write the received image with hidden data to a file
-        let mut output_image_file = File::create("files/received_with_hidden.png").await.unwrap();
-        output_image_file.write_all(&output_image_data).await.unwrap();
-        println!("Received image with hidden data saved as 'files/received_with_hidden.png'.");
+        // let mut output_image_file = File::create("files/received_with_hidden.png").await.unwrap();
+        // output_image_file.write_all(&output_image_data).await.unwrap();
+        // println!("Received image with hidden data saved as 'files/received_with_hidden.png'.");
+        match File::create("files/received_with_hidden.png").await {
+            Ok(mut output_image_file) => {
+                if let Err(e) = output_image_file.write_all(&output_image_data).await {
+                    eprintln!("Failed to write received image with hidden data to file: {}", e);
+                } else {
+                    println!("Received image with hidden data saved as 'files/received_with_hidden.png'.");
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to create file for received image with hidden data: {}", e);
+            }
+        }
 
 
         // Extract the hidden image from the received image
-        server_decrypt_img("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await;
-        println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'.");
+        // server_decrypt_img("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await;
+        // println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'.");
+        match server_decrypt_img("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await {
+            Ok(_) => {
+                println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'.");
+            }
+            Err(e) => {
+                eprintln!("Failed to extract hidden image: {}", e);
+            }
+        }
     }
 }

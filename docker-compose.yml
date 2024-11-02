@@ -1,0 +1,34 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  server1:
+    build:
+      context: .
+      dockerfile: dockerfile.server
+    networks:
+      distri_net:
+        ipv4_address: 172.20.0.2
+
+  server2:
+    build:
+      context: .
+      dockerfile: dockerfile.server1
+    networks:
+      distri_net:
+        ipv4_address: 172.20.0.3
+
+  client:
+    build:
+      context: .
+      dockerfile: dockerfile.client
+    networks:
+      distri_net:
+        ipv4_address: 172.20.0.4
+
+networks:
+  distri_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
