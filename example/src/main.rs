@@ -80,6 +80,7 @@ async fn main() {
             let mut failures = 0;
 
             // Load test: Send 10_000 requests
+            let mut failures = 0;
             for _ in 0..10 {
                 match client.send_data(file_path, "Encrypt").await {
                     Ok(_) => println!("Sent image: {}", file_path),
@@ -95,7 +96,8 @@ async fn main() {
             if report {
                 println!("doing report");
                 client.collect_stats().await;
-                println!("Total failed Tasks: {}", failures);
+
+                println!("Total Failed Tasks: {}\n", failures);
             }
         }
         _ => {
