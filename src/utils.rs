@@ -5,8 +5,9 @@ use steganography::util::*;
 use base64;
 use std::error::Error;
 use tokio::net::UdpSocket;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, timeout};
 use std::net::SocketAddr;
+use std::io;
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
@@ -110,4 +111,18 @@ pub async fn send_with_retry(socket: &UdpSocket, message: &[u8], addr: SocketAdd
     }
     // If all retries are exhausted, return an error (this should be unreachable)
     Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to send message after retries"))
+}
+
+
+pub async fn recv_with_timeout(
+    socket: &UdpSocket,
+    buffer: &mut [u8],
+    timeout_duration: Duration,
+) -> Result<(usize, SocketAddr), io::Error> {
+    // Use `timeout` to limit the time we wait for `recv_from`
+    match timeout(timeout_duration, socket.recv_from(buffer)).await {
+        Ok(Ok((size, addr))) => Ok((size, addr)), // Successfully received data within timeout
+        Ok(Err(e)) => Err(e),                      // Error from `recv_from`
+        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "recv_from timed out")), // Timeout error
+    }
 }

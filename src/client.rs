@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::error::Error;
 use tokio::fs::File;
-use crate::utils::{END_OF_TRANSMISSION, server_decrypt_img};
+use crate::utils::{END_OF_TRANSMISSION, server_decrypt_img, send_with_retry, recv_with_timeout};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 
@@ -50,7 +50,8 @@ impl Client {
             let node_addr = node_addr.clone(); // Clone the address
             println!("sending request to  {}", node_addr);
 
-            match socket.send_to(request_message.as_bytes(), &node_addr).await {
+            // match socket.send_to(request_message.as_bytes(), &node_addr).await {
+            match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
                 Ok(_) => {
                     println!("Request message sent to {}", node_addr);
                 }
@@ -83,13 +84,15 @@ impl Client {
                 if n == 0 {
                     break; // EOF reached
                 }
-                socket.send_to(&send_buffer[..n], &addr).await?;
+                // socket.send_to(&send_buffer[..n], &addr).await?;
+                send_with_retry(&socket, &send_buffer[..n], addr, 5).await?;
                 println!("Sent chunk {} of size {}", chunk_index, n);
                 chunk_index += 1;
             }
 
             // Send end-of-image signal
-            socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
+            // socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
+            send_with_retry(&socket, END_OF_TRANSMISSION.as_bytes(), addr, 5).await?;
             println!("End of image signal sent.");
 
             // start receiving result
@@ -110,7 +113,8 @@ impl Client {
         // Send the request message to all nodes
         for node_addr in self.nodes.values() {
             let node_addr = node_addr.clone(); // Clone the address
-            match socket.send_to(request_message.as_bytes(), &node_addr).await {
+            // match socket.send_to(request_message.as_bytes(), &node_addr).await {
+            match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
                 Ok(_) => {
                     println!("Stats request sent to {}", node_addr);
                 }

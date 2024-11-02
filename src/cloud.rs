@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use std::io::Result;
 use std::time::{Duration, Instant};
-use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img, send_with_retry};
+use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout};
 use rand::Rng; 
 
 
@@ -108,12 +108,12 @@ impl CloudNode {
             let packet = buffer[..size].to_vec();
             let node = self.clone();
 
-            let random_value = rand::thread_rng().gen_range(1..=10);
+            let random_value = rand::thread_rng().gen_range(0..=10);
             // If the random value is 0, do something
             if random_value == 0 || *self.failed.lock().await  {  // start failure election
                 let mut failed = self.failed.lock().await;
                 *failed = false; // Reset election state initially
-                self.get_info().await; // Retrieve updated info from all nodes
+                self.get_info(); // Retrieve updated info from all nodes
                 *failed = self.election_alg().await; // Elect a node to fail
                 if *failed {
                     println!("Node {} with is now failed.", self.public_socket.local_addr()?);
