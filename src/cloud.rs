@@ -85,12 +85,10 @@ impl CloudNode {
         loop {
             println!("looping0");
             // let (size, addr) = self.public_socket.recv_from(&mut buffer).await?;
-            let (size, addr) = match recv_with_timeout(&self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
-                Ok((size, addr)) => (size, addr), // Successfully received data
+            let (size, addr, _packet_id) = match recv_with_ack(&self.public_socket, &mut buffer, &mut processed_ids).await {
+                Ok((size, addr, packet_id)) => (size, addr, packet_id),
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     continue;
-                    // eprintln!("Receive operation timed out");
-                    // continue; // Early exit or perform specific logic on timeout
                 },
                 Err(e) => {
                     eprintln!("Failed to receive data: {:?}", e);
@@ -269,7 +267,7 @@ impl CloudNode {
         // *elected = self.id == elected_node;
         let elected = *self.id.lock().await == elected_node;
         println!("elected node: {}", elected_node);
-        is_elected
+        elected
     }
 
     async fn handle_connection(self: &Arc<Self>, data: Vec<u8>, size: usize, addr: SocketAddr) -> Result<()> {
@@ -341,7 +339,7 @@ impl CloudNode {
         
             // Send the stats report back to the client
             // socket.send_to(stats_report.as_bytes(), &addr).await?;
-            send_with_retry(&socket, stats_report.as_bytes(), addr, 5).await?;
+            send_with_retry(&socket, stats_report.as_bytes(), addr, 5, 5).await?;
         }
         println!("done handling connection for: {}", addr);
         Ok(())
