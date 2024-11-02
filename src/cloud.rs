@@ -83,73 +83,108 @@ impl CloudNode {
         let mut processed_ids = HashSet::new();
 
         loop {
-            let (size, addr, _packet_id) = match recv_with_ack(&self.public_socket, &mut buffer, &mut processed_ids).await {
-                Ok((size, addr, packet_id)) => (size, addr, packet_id),
+            println!("looping0");
+            // let (size, addr) = self.public_socket.recv_from(&mut buffer).await?;
+            let (size, addr) = match recv_with_timeout(&self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
+                Ok((size, addr)) => (size, addr), // Successfully received data
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    eprintln!("Receive operation timed out");
                     continue;
+                    // eprintln!("Receive operation timed out");
+                    // continue; // Early exit or perform specific logic on timeout
                 },
                 Err(e) => {
                     eprintln!("Failed to receive data: {:?}", e);
                     continue;
                 }
             };
-
+            println!("looping1");
+             // Clone buffer data to process it in a separate task
             let packet = buffer[..size].to_vec();
-            let node = self.clone();
+            
 
             let random_value = rand::thread_rng().gen_range(0..=10);
-            if random_value == 0 || *self.failed.lock().await {
+            println!("looping2");
+            // If the random value is 0, do something
+            if random_value == 0 && !*self.failed.lock().await  {  // start failure election
+                println!("looping2.1");
                 let mut failed = self.failed.lock().await;
-                *failed = false;
-                self.get_info().await;
-                *failed = self.election_alg().await;
-
+                *failed = false; // Reset election state initially
+                println!("looping2.11");
+                self.get_info(); // Retrieve updated info from all nodes
+                println!("looping2.12");
+                *failed = self.election_alg().await; // Elect a node to fail
+                println!("looping2.13");
                 if *failed {
-                    println!("Node {} is now marked as failed.", self.public_socket.local_addr()?);
+                    *self.failed_number_of_times.lock().await += 1;
+                    println!("Node {} with is now failed.", self.public_socket.local_addr()?);
                 }
+                println!("looping2.2");
             }
-
+            println!("looping3");
+            
+            // while failed do nothing at all
             if *self.failed.lock().await {
+                println!("looping3.1");
                 let random_value = rand::thread_rng().gen_range(0..=10);
                 if random_value == 0 {
+                    println!("looping3.2");
                     println!("Node {} is back up from failure.", self.public_socket.local_addr()?);
                     let mut failed = self.failed.lock().await;
                     *failed = false;
-                } else {
+                    println!("looping3.3");
+                }
+                else {
+                    // stay failed
+                    println!("Node is dead");
                     continue;
                 }
             }
+            println!("looping4");
+            // perform election
+            self.elect_leader();
+            println!("looping5");
+            //  to check different services
+            let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&packet[..size]);
+            println!("looping6");
+            if received_msg == "Request: Stats" || received_msg == "Request: Encrypt"  {
 
-            self.elect_leader().await;
+                if *self.elected.lock().await || received_msg == "Request: Stats" { // accept stats request always
+                    println!("looping7");
+                    if received_msg == "Request: Encrypt" {
+                        *self.accepted.lock().await += 1;
+                    }
 
-            let received_msg = String::from_utf8_lossy(&packet[..size]);
-
-            if received_msg == "Request: Stats" || received_msg == "Request: Encrypt" {
-                if *self.elected.lock().await || received_msg == "Request: Stats" {
-                    *self.accepted.lock().await += 1;
-
-                    let node_clone = Arc::clone(&node);
+                    // Spawn a task to handle the connection and data processing
+                    println!("looping8");
+                    // let node_clone = Arc::clone(&node);  // an alternative to using self, to not cause ownership errors
+                    let node = self.clone();
                     tokio::spawn(async move {
                         let start_time = Instant::now();
-                        if let Err(e) = node_clone.handle_connection(packet, size, addr).await {
+                        if let Err(e) = node.handle_connection(packet, size, addr).await {
                             eprintln!("Error handling connection: {:?}", e);
-                            *node_clone.failures.lock().await += 1;
-                        } else {
-                            let elapsed = start_time.elapsed();
-                            *node_clone.total_task_time.lock().await += elapsed;
+                            *node.failures.lock().await += 1; 
+                        }
+                        else{
+                            let elapsed: Duration = start_time.elapsed();
+                            // Accumulate the elapsed time into total_task_time
+                            *node.total_task_time.lock().await += elapsed;
                         }
                     });
                 }
-            } else if received_msg == "Request: UpdateInfo" {
-                println!("Received UpdateInfo");
-
-                tokio::spawn(async move {
-                    if let Err(e) = node.handle_info_request(addr).await {
-                        eprintln!("Error handling info connection: {:?}", e);
-                    }
-                    println!("Responded to get info request");
-                });
+            }
+            else if received_msg == "Request: UpdateInfo" {
+                println!("received UpdateInfo");
+                if let Err(e) = self.handle_info_request(addr).await {
+                    eprintln!("Error handling info connection: {:?}", e);
+                }
+                
+                // tokio::spawn(async move {
+                //     if let Err(e) = node.handle_info_request(addr).await {
+                //         eprintln!("Error handling info connection: {:?}", e);
+                //     }
+                //     println!("responded to getinfo")
+                    
+                // });
             }
         }
     }
@@ -183,6 +218,9 @@ impl CloudNode {
                         println!("Updated info for node {}: mem = {}", node_info.id, node_info.mem);
                     }
                 },
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    eprintln!("getinfo operation timed out");
+                },
                 Err(e) => {
                     eprintln!("Failed to receive response from {}: {:?}", addr, e);
                 }
@@ -203,17 +241,21 @@ impl CloudNode {
     }
 
     async fn elect_leader(self: &Arc<Self>) {
+        // let clone = self.clone();
+        
+        // *elected = false; // Reset election state initially
+        self.get_info().await; // Retrieve updated info from all nodes
         let mut elected = self.elected.lock().await;
-        *elected = false;
-        self.get_info().await;
-        *elected = self.election_alg().await;
+        *elected = self.election_alg().await; // Elect a leader based on mem and id values
         println!("elected value: {}", elected);
     }
 
     async fn election_alg(self: &Arc<Self>) -> bool {
+        println!("election1");
         let nodes = self.nodes.lock().await;
         let mut lowest_mem = *self.mem.lock().await;
         let mut elected_node = *self.id.lock().await;
+        println!("election2");
 
         for (_, node_info) in nodes.iter() {
             if node_info.mem < lowest_mem || (node_info.mem == lowest_mem && node_info.id < elected_node) {
@@ -221,8 +263,11 @@ impl CloudNode {
                 elected_node = node_info.id;
             }
         }
+        println!("election3");
 
-        let is_elected = *self.id.lock().await == elected_node;
+        // let mut elected = self.elected.lock().await;
+        // *elected = self.id == elected_node;
+        let elected = *self.id.lock().await == elected_node;
         println!("elected node: {}", elected_node);
         is_elected
     }
@@ -293,10 +338,12 @@ impl CloudNode {
                 total_time,
                 avg_completion_time,
             );
-
-            send_with_retry(&socket, stats_report.as_bytes(), addr, 5, 5).await?;
-            println!("Sent stats report to client {}", addr);
+        
+            // Send the stats report back to the client
+            // socket.send_to(stats_report.as_bytes(), &addr).await?;
+            send_with_retry(&socket, stats_report.as_bytes(), addr, 5).await?;
         }
+        println!("done handling connection for: {}", addr);
         Ok(())
     }
 
