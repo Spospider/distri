@@ -1,6 +1,5 @@
 use tokio::net::UdpSocket;
 use std::collections::HashMap;
-// use std::path::Path;
 use std::net::SocketAddr;
 use std::error::Error;
 use tokio::fs::File;
@@ -39,26 +38,29 @@ impl Client {
         self.nodes.insert(name, address);
     }
 
-    /// and waits for the server's response.
-    pub async fn send_data(&self, file_path: &str) -> Result<(), Box<dyn Error>> {
+    pub async fn send_data(&self, file_path: &str, service:&str) -> Result<(), Box<dyn Error>> {
         
         // Create a UDP socket for sending and receiving messages
         let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
         
-        let request_message = "Request: Encrypt".to_string(); // The message to be sent
+        let request_message = format!("Request: {}", service); // The message to be sent
 
         // Multicast the message to all nodes
         for node_addr in self.nodes.values() {
             let node_addr = node_addr.clone(); // Clone the address
+            println!("sending request to  {}", node_addr);
 
             match socket.send_to(request_message.as_bytes(), &node_addr).await {
                 Ok(_) => {
                     println!("Request message sent to {}", node_addr);
                 }
                 Err(e) => {
+                    // this doesnt
                     eprintln!("Failed to send message to {}: {:?}", node_addr, e);
                 }
             }
+            // why is this unreachable??
+            println!("done  {}", node_addr);
         }
 
         // Buffer for receiving data
@@ -97,6 +99,40 @@ impl Client {
 
         Ok(())
     }
+
+
+    pub async fn collect_stats(&self) -> Result<(), Box<dyn Error>> {
+        // Create a UDP socket
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
+        
+        let request_message = "Request: Stats"; // Message to send for collecting stats
+
+        // Send the request message to all nodes
+        for node_addr in self.nodes.values() {
+            let node_addr = node_addr.clone(); // Clone the address
+            match socket.send_to(request_message.as_bytes(), &node_addr).await {
+                Ok(_) => {
+                    println!("Stats request sent to {}", node_addr);
+                }
+                Err(e) => {
+                    eprintln!("Failed to send stats request to {}: {:?}", node_addr, e);
+                }
+            }
+        }
+
+        // Set up a buffer to receive responses
+        let mut buffer = [0u8; 65535];
+
+        // Loop to collect and print responses from each server
+        for _ in 0..self.nodes.len() {
+            let (size, addr) = socket.recv_from(&mut buffer).await?;
+            let response = String::from_utf8_lossy(&buffer[..size]);
+            println!("Received response from {}: {}", addr, response);
+        }
+
+        Ok(())
+    }
+
 
     async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) {
         // Receive the steganography result (image with hidden content) from the server

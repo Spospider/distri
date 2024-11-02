@@ -5,8 +5,6 @@ use steganography::util::*;
 use base64;
 
 
-
-
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
 
 

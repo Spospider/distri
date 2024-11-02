@@ -191,13 +191,16 @@ use tokio::net::{UdpSocket, TcpStream, TcpListener};
 use tokio::sync::Mutex;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::collections::HashMap;
+// use std::os::unix::net::SocketAddr;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use std::io::Result;
+use std::time::{Duration, Instant};
 use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img};
-// use rand::random;
+
 
 #[derive(Clone)]
 pub struct NodeInfo {
@@ -206,13 +209,24 @@ pub struct NodeInfo {
     pub addr: SocketAddr,
 }
 
+
 pub struct CloudNode {
     nodes: Arc<Mutex<HashMap<String, NodeInfo>>>,  // Keeps track of other cloud nodes
     public_socket: Arc<UdpSocket>,
     chunk_size: usize,
     elected: Mutex<bool>,   // Elected state wrapped in Mutex for safe mutable access
+    failed: Mutex<bool>,
     mem: u8,
     id: u8,
+    // internal_socket: Arc<UdpSocket>,
+    
+    // For stats
+    accepted:Arc<Mutex<u32>>,
+    completed:Arc<Mutex<u32>>,
+    failed_number_of_times:Arc<Mutex<u32>>,
+    failures:Arc<Mutex<u32>>,
+    total_task_time:Arc<Mutex<Duration>>,
+    
 }
 
 impl CloudNode {
@@ -227,14 +241,27 @@ impl CloudNode {
     ) -> Result<Arc<Self>> {
         let initial_nodes = nodes.unwrap_or_else(HashMap::new);
         let socket = UdpSocket::bind(address).await?;
+        let failed = false;
+      
+        // (address: SocketAddr)use address ip only as str here
+        // let internal_socket: SocketAddr = format!("{}:{}", address.ip().to_string(), 4444).parse().unwrap();
+
 
         Ok(Arc::new(CloudNode {
             nodes: Arc::new(Mutex::new(initial_nodes)),
             public_socket: Arc::new(socket),
             chunk_size,
             elected: Mutex::new(elected),
+            failed: Mutex::new(failed),
             mem,
             id,
+          
+            // Stats init
+            accepted: Arc::new(Mutex::new(0)),
+            completed: Arc::new(Mutex::new(0)),
+            failed_number_of_times: Arc::new(Mutex::new(0)),
+            failures: Arc::new(Mutex::new(0)),
+            total_task_time: Arc::new(Mutex::new(Duration::default())),
         }))
     }
 
@@ -244,20 +271,20 @@ impl CloudNode {
         let listener = TcpListener::bind(self.public_socket.local_addr()?).await?;
         println!("Listening for incoming info requests on {:?}", listener.local_addr());
 
-        // Spawn a task to handle incoming TCP connections separately
-        let node = self.clone();
-        tokio::spawn(async move {
-            loop {
-                if let Ok((socket, addr)) = listener.accept().await {
-                    let node_clone = node.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = node_clone.handle_info_request(socket, addr).await {
-                            eprintln!("Failed to handle info request from {}: {:?}", addr, e);
-                        }
-                    });
-                }
-            }
-        });
+//         // Spawn a task to handle incoming TCP connections separately
+//         let node = self.clone();
+//         tokio::spawn(async move {
+//             loop {
+//                 if let Ok((socket, addr)) = listener.accept().await {
+//                     let node_clone = node.clone();
+//                     tokio::spawn(async move {
+//                         if let Err(e) = node_clone.handle_info_request(socket, addr).await {
+//                             eprintln!("Failed to handle info request from {}: {:?}", addr, e);
+//                         }
+//                     });
+//                 }
+//             }
+//         });
 
         // Initial leader election and info retrieval
         {
@@ -273,19 +300,46 @@ impl CloudNode {
              // Clone buffer data to process it in a separate task
             let packet = buffer[..size].to_vec();
             let node = self.clone();
-             tokio::spawn(async move {
-                let elected = *node.elected.lock().await;
-                if elected {
-                    if let Err(e) = node.handle_connection(packet, size, addr).await {
-                        eprintln!("Error handling connection: {:?}", e);
-                    }
+
+
+            //  to check different services
+            let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&packet[..size]);
+          
+            if received_msg == "Request: Stats" || received_msg == "Request: Encrypt"  {
+
+                if (self.elected.lock().await; && !self.failed.lock().await;) || received_msg == "Request: Stats" { // accept stats request always
+                    // self.accepted += 1;
+                    // self.accepted.fetch_add(1, Ordering::SeqCst);
+                    *self.accepted.lock().await += 1;
+
+                    // Spawn a task to handle the connection and data processing
+                    let node_clone = Arc::clone(&node);  // an alternative to using self, to not cause ownership errors
+                    tokio::spawn(async move {
+                        let start_time = Instant::now(); // Record start time
+                        if let Err(e) = node.handle_connection(packet, size, addr).await {
+                            eprintln!("Error handling connection: {:?}", e);
+
+                            *node_clone.failures.lock().await += 1; // how to make this not cause an error
+                        }
+                        else{
+                            let elapsed = start_time.elapsed();
+
+                            // Accumulate the elapsed time into total_task_time
+                            *node_clone.total_task_time.lock().await += elapsed;
+                        }
+
+                    });
                 }
-            });
+            }
+          else if received_msg == "Request: Info" {
+             // TODO process info request here instead
+          }
         }
-
-        // Ok(())
+        Ok(())
     }
+              
 
+ // election stuff
     /// Retrieves updated information from all nodes using TCP messages
     async fn get_info(&self) {
         let node_addresses: Vec<(String, SocketAddr)> = {
@@ -294,6 +348,7 @@ impl CloudNode {
         };
 
         for (node_id, addr) in node_addresses {
+          // TODO use UDP here
             if let Ok(mut stream) = TcpStream::connect(addr).await {
                 if stream.write_all(b"Request: Update").await.is_ok() {
                     let mut buffer = [0u8; 1024];
@@ -349,6 +404,7 @@ impl CloudNode {
     }
 
     /// Handles incoming TCP requests for node information
+  // TODO use UDP here
     async fn handle_info_request(&self, mut socket: TcpStream, addr: SocketAddr) -> Result<()> {
         println!("Received info request from {}", addr);
 
@@ -386,6 +442,9 @@ impl CloudNode {
         *elected = self.id == elected_node;
         println!("Node {} is elected as leader: {} with mem={}", self.id, *elected, self.mem);
     }
+  
+ // end election stuff
+
 
     /// Handle an incoming connection, aggregate the data, process it, and send a response
     async fn handle_connection(self: Arc<Self>, data: Vec<u8>, size: usize, addr: SocketAddr) -> Result<()> {
@@ -435,8 +494,57 @@ impl CloudNode {
             }
             socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
             println!("Task for client done: {}", addr);
+            *self.completed.lock().await += 1;
         }
+        else if received_msg == "Request: Stats" {
+            //send a report of the stats for vars:
+                // accepted:Arc<Mutex<u32>>,
+                // completed:Arc<Mutex<u32>>,
+                // failed_number_of_times:Arc<Mutex<u32>>,
+                // failures:Arc<Mutex<u32>>,
+                // total_task_time:Arc<Mutex<Duration>>,
+            // back to the client in a human readable format
+            println!("Processing stats request from client: {}", addr);
 
+            // Establish a connection to the client for sending responses
+            let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
+        
+            // Lock and retrieve values from the shared stats variables
+            let accepted = *self.accepted.lock().await;
+            let completed = *self.completed.lock().await;
+            let failed_times = *self.failed_number_of_times.lock().await;
+            let failures = *self.failures.lock().await;
+            let total_time = *self.total_task_time.lock().await;
+        
+            // Calculate the average task completion time if there are any completed tasks
+            let avg_completion_time = if completed > 0 {
+                total_time / completed as u32
+            } else {
+                Duration::from_secs(0)
+            };
+        
+            // Create a human-readable stats report
+            let stats_report = format!(
+                "Server Stats:\n\
+                Accepted Requests: {}\n\
+                Completed Tasks: {}\n\
+                Failed Attempts: {}\n\
+                Failures: {}\n\
+                Total Task Time: {:.2?}\n\
+                Avg Completion Time: {:.2?}\n",
+                accepted,
+                completed,
+                failed_times,
+                failures,
+                total_time,
+                avg_completion_time,
+            );
+        
+            // Send the stats report back to the client
+            socket.send_to(stats_report.as_bytes(), &addr).await?;
+            println!("Sent stats report to client {}", addr);
+        
+        }
         Ok(())
     }
 

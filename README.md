@@ -1,6 +1,10 @@
 # Distri
 A Rust framework designed for distributed computing, focusing on both distributed cloud (client-service architecture) and peer-to-peer networking (to be implemented). The framework aims to provide a robust, high-performance, and fault-tolerant solution for building distributed applications with ease.
 
+### TODO
+- CMD args for ip tables
+- Tolerate failure during handle_connection()
+- Usecase on different machines
 
 ### Directory Structure:
 ```

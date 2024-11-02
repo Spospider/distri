@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 base64 = "0.22.1"
+clap = "4.5.20"
+engine = "0.0.0"
 image = "0.25.4"
 sha2 = "0.10"  # Use the latest compatible version
 steganography = "1.0.2"
