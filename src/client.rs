@@ -62,8 +62,6 @@ impl Client {
                     eprintln!("Failed to send message to {}: {:?}", node_addr, e);
                 }
             }
-            // why is this unreachable??
-            println!("done  {}", node_addr);
         }
 
         // Buffer for receiving data
