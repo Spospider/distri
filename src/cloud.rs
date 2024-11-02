@@ -170,19 +170,20 @@ impl CloudNode {
 
                 if *self.elected.lock().await || received_msg == "Request: Stats" { // accept stats request always
                     println!("looping7");
-                    if received_msg == "Request: Encrypt" {
-                        *self.accepted.lock().await += 1;
-                    }
+                    
 
                     // Spawn a task to handle the connection and data processing
                     println!("looping8");
                     // let node_clone = Arc::clone(&node);  // an alternative to using self, to not cause ownership errors
                     let node = self.clone();
+                    let tmp = received_msg.to_string();
                     tokio::spawn(async move {
                         let start_time = Instant::now(); // Record start time
                         if let Err(e) = node.handle_connection(packet, size, addr).await {
                             eprintln!("Error handling connection: {:?}", e);
-                            *node.failures.lock().await += 1; 
+                            if tmp == "Request: Encrypt" {
+                                *node.failures.lock().await += 1; 
+                            }
                         }
                         else{
                             let elapsed: Duration = start_time.elapsed();
@@ -328,6 +329,7 @@ impl CloudNode {
         println!("Got request from {}: {}", addr, received_msg);
 
         if received_msg == "Request: Encrypt" {
+            *self.accepted.lock().await += 1;
             println!("Processing request from client: {}", addr);
 
             // Establish a connection to the client for sending responses
@@ -381,11 +383,11 @@ impl CloudNode {
             let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         
             // Lock and retrieve values from the shared stats variables
-            let accepted = *self.accepted.lock().await;
-            let completed = *self.completed.lock().await;
-            let failed_times = *self.failed_number_of_times.lock().await;
-            let failures = *self.failures.lock().await;
-            let total_time = *self.total_task_time.lock().await;
+            let accepted = self.accepted.lock().await.clone();
+            let completed = self.completed.lock().await.clone();
+            let failed_times = self.failed_number_of_times.lock().await.clone();
+            let failures = self.failures.lock().await.clone();
+            let total_time = self.total_task_time.lock().await.clone();
         
             // Calculate the average task completion time if there are any completed tasks
             let avg_completion_time = if completed > 0 {
@@ -400,13 +402,12 @@ impl CloudNode {
                 Accepted Requests: {}\n\
                 Completed Tasks: {}\n\
                 Failed Attempts: {}\n\
-                Failures: {}\n\
                 Total Task Time: {:.2?}\n\
                 Avg Completion Time: {:.2?}\n",
                 accepted,
                 completed,
                 failed_times,
-                failures,
+                // failures,
                 total_time,
                 avg_completion_time,
             );
