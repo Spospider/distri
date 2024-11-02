@@ -79,10 +79,14 @@ async fn main() {
             }
 
             // Load test: Send 10_000 requests
+            let mut failures = 0;
             for _ in 0..10 {
                 match client.send_data(file_path, "Encrypt").await {
                     Ok(_) => println!("Sent image: {}", file_path),
-                    Err(e) => eprintln!("Failed to send image {}: {:?}", file_path, e),
+                    Err(e) => {
+                        eprintln!("Failed to send image {}: {:?}", file_path, e);
+                        failures += 1;
+                    }
                 }
                 sleep(Duration::from_millis(50)).await; // Optional delay between requests
             }
@@ -91,6 +95,7 @@ async fn main() {
             if report {
                 println!("doing report");
                 client.collect_stats().await;
+                println!("Total Failed Tasks: {}\n", failures);
             }
         }
         _ => {
