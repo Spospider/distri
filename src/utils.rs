@@ -11,6 +11,8 @@ use std::io;
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
+pub const DEFAULT_TIMEOUT: u64 = 10; // in seconds
+pub const RETRY_INTERVAL: u64 = 1; // in seconds
 
 
 // Server encrypt: hides second image inside the first image
@@ -101,7 +103,7 @@ pub async fn send_with_retry(socket: &UdpSocket, message: &[u8], addr: SocketAdd
                 eprintln!("Failed to send message to {}: {:?} (attempt {}/{})", addr, e, attempts, max_retries);
                 if attempts < max_retries {
                     // Wait a bit before retrying
-                    sleep(Duration::from_millis(100)).await;
+                    sleep(Duration::from_secs(RETRY_INTERVAL)).await;
                 } else {
                     // Exhausted retries, return the error
                     return Err(e);

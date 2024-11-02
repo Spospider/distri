@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use std::io::Result;
 use std::time::{Duration, Instant};
-use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout};
+use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout};
 use rand::Rng; 
 
 
@@ -103,7 +103,18 @@ impl CloudNode {
 
         let mut buffer = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
         loop {
-            let (size, addr) = self.public_socket.recv_from(&mut buffer).await?;
+            // let (size, addr) = self.public_socket.recv_from(&mut buffer).await?;
+            let (size, addr) = match recv_with_timeout(&self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
+                Ok((size, addr)) => (size, addr), // Successfully received data
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    eprintln!("Receive operation timed out");
+                    continue; // Early exit or perform specific logic on timeout
+                },
+                Err(e) => {
+                    eprintln!("Failed to receive data: {:?}", e);
+                    continue; // Early exit or handle the error in some other way
+                }
+            };
              // Clone buffer data to process it in a separate task
             let packet = buffer[..size].to_vec();
             let node = self.clone();
@@ -122,7 +133,6 @@ impl CloudNode {
             
             // while failed do nothing at all
             if *self.failed.lock().await {
-
                 let random_value = rand::thread_rng().gen_range(0..=10);
                 if random_value == 0 {
                     println!("Node {} is back up from failure.", self.public_socket.local_addr()?);
@@ -211,7 +221,8 @@ impl CloudNode {
             let mut buffer = [0u8; 1024];
             
             // Receive the response from the node
-            match socket.recv_from(&mut buffer).await {
+            // match socket.recv_from(&mut buffer).await {
+            match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                 Ok((size, _)) => {
                     let updated_mem:u16 = buffer[..size].get(0).copied().unwrap_or(0).into();
     
@@ -308,7 +319,9 @@ impl CloudNode {
 
             // Receive data in chunks from the client
             loop {
-                let (size, _) = socket.recv_from(&mut buffer).await?;
+                // let (size, _) = socket.recv_from(&mut buffer).await?;
+                let (size, _) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+                
                 let received_data = String::from_utf8_lossy(&buffer[..size]);
 
                 // Check for the end of transmission message

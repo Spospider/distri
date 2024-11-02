@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::error::Error;
 use tokio::fs::File;
-use crate::utils::{END_OF_TRANSMISSION, server_decrypt_img, send_with_retry, recv_with_timeout};
+use crate::utils::{END_OF_TRANSMISSION, DEFAULT_TIMEOUT, server_decrypt_img, send_with_retry, recv_with_timeout};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::Duration;
+
 
 
 pub struct Client {
@@ -68,7 +70,9 @@ impl Client {
         let mut buffer = [0u8; 1024];
 
         // Now, listen for the first response that comes back from any node
-        let (size, addr) = socket.recv_from(&mut buffer).await?;
+        // let (size, addr) = socket.recv_from(&mut buffer).await?;
+        let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+
         let response = String::from_utf8_lossy(&buffer[..size]);
         if response == "OK" {
             println!("request for service accepted from {}", addr);
@@ -129,7 +133,9 @@ impl Client {
 
         // Loop to collect and print responses from each server
         for _ in 0..self.nodes.len() {
-            let (size, addr) = socket.recv_from(&mut buffer).await?;
+            // let (size, addr) = socket.recv_from(&mut buffer).await?;
+
+            let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
             let response = String::from_utf8_lossy(&buffer[..size]);
             println!("Received response from {}: {}", addr, response);
         }
@@ -143,7 +149,8 @@ impl Client {
         let mut output_image_data = Vec::new();
         let mut buffer: Vec<u8> = vec![0u8; self.chunk_size];
         loop {
-            let (n, _addr) = socket.recv_from(&mut buffer).await.unwrap();
+            // let (n, _addr) = socket.recv_from(&mut buffer).await.unwrap();
+            let (n, _addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await.unwrap();
             if _addr != sender {
                 // ignore packets from other senders
                 continue;
