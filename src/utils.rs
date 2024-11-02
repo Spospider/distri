@@ -4,6 +4,9 @@ use steganography::decoder::*;
 use steganography::util::*;
 use base64;
 use std::error::Error;
+use tokio::net::UdpSocket;
+use tokio::time::{sleep, Duration};
+use std::net::SocketAddr;
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
@@ -69,4 +72,42 @@ async fn read_from_img(img_path: &str) -> String {
     let message = bytes_to_str(clean_buffer.as_slice());
     // println!("{:?}", message);
     message.to_string()
+}
+
+
+/// Sends a message to a specified address with a specified number of retry attempts.
+/// 
+/// # Arguments
+/// * `socket` - The UDP socket to use for sending the message.
+/// * `message` - The message to send as a byte slice.
+/// * `addr` - The destination address.
+/// * `max_retries` - Maximum number of retries on failure.
+/// 
+/// # Returns
+/// * `Result<(), std::io::Error>` - Returns `Ok(())` on success, or an error after all retries fail.
+pub async fn send_with_retry(socket: &UdpSocket, message: &[u8], addr: SocketAddr, max_retries: u8) -> Result<(), std::io::Error> {
+    let mut attempts = 0;
+    while attempts < max_retries {
+        attempts += 1;
+        
+        match socket.send_to(message, addr).await {
+            Ok(_) => {
+                // Successfully sent the message
+                // println!("Successfully sent message to {} on attempt {}", addr, attempts);
+                return Ok(());
+            },
+            Err(e) => {
+                eprintln!("Failed to send message to {}: {:?} (attempt {}/{})", addr, e, attempts, max_retries);
+                if attempts < max_retries {
+                    // Wait a bit before retrying
+                    sleep(Duration::from_millis(100)).await;
+                } else {
+                    // Exhausted retries, return the error
+                    return Err(e);
+                }
+            },
+        }
+    }
+    // If all retries are exhausted, return an error (this should be unreachable)
+    Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to send message after retries"))
 }

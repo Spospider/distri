@@ -1,192 +1,3 @@
-// use tokio::net::UdpSocket;
-// use tokio::sync::Mutex;
-// use tokio::fs::File;
-// use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-// use std::collections::HashMap;
-// use std::sync::Arc;
-// use std::net::SocketAddr;
-// use std::io::Result;
-// use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img};
-// use rand::random;
-
-// #[derive(Clone)]
-// pub struct NodeInfo {
-//     pub mem: u8,
-//     pub id: u8,
-//     pub addr: SocketAddr,
-// }
-
-// pub struct CloudNode {
-//     nodes: Arc<Mutex<HashMap<String, NodeInfo>>>,  // Keeps track of other cloud nodes
-//     public_socket: Arc<UdpSocket>,
-//     chunk_size: usize,
-//     elected: Mutex<bool>,   // Elected state wrapped in Mutex for safe mutable access
-//     mem: u8,
-//     id: u8,
-// }
-
-// impl CloudNode {
-//     /// Creates a new CloudNode
-//     pub async fn new(
-//         address: SocketAddr,
-//         nodes: Option<HashMap<String, NodeInfo>>,
-//         chunk_size: usize,
-//         elected: bool,
-//         mem: u8,
-//         id: u8,
-//     ) -> Result<Arc<Self>> {
-//         let initial_nodes = nodes.unwrap_or_else(HashMap::new);
-//         let socket = UdpSocket::bind(address).await?;
-
-//         Ok(Arc::new(CloudNode {
-//             nodes: Arc::new(Mutex::new(initial_nodes)),
-//             public_socket: Arc::new(socket),
-//             chunk_size,
-//             elected: Mutex::new(elected),
-//             mem,
-//             id,
-//         }))
-//     }
-
-//     /// Starts the server, listens for new connections, and processes data
-//     pub async fn serve(self: Arc<Self>) -> Result<()> {
-//         {
-//             let mut elected = self.elected.lock().await;
-//             *elected = false;  // Reset election state initially
-
-//             self.get_info().await;    // Retrieve updated info from all nodes
-//             self.elect_leader().await; // Elect a leader based on mem and id values
-//         }
-
-//         let mut buffer = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
-
-//         loop {
-//             let (size, addr) = self.public_socket.recv_from(&mut buffer).await?;
-
-//             // Clone buffer data to process it in a separate task
-//             let packet = buffer[..size].to_vec();
-//             let node = self.clone();
-
-//             tokio::spawn(async move {
-//                 let elected = *node.elected.lock().await;
-//                 if elected {
-//                     if let Err(e) = node.handle_connection(packet, size, addr).await {
-//                         eprintln!("Error handling connection: {:?}", e);
-//                     }
-//                 }
-//             });
-//         }
-//     }
-
-//     /// Retrieves updated information from all nodes
-//     async fn get_info(&self) {
-//         let mut nodes = self.nodes.lock().await;
-//         for (_, node_info) in nodes.iter_mut() {
-//             node_info.mem = random::<u8>();  // Simulate updated mem
-//             println!("Updated info for node {}: mem = {}", node_info.id, node_info.mem);
-//         }
-//     }
-
-//     /// Elects the leader node based on the lowest mem value, breaking ties with the lowest id
-//     async fn elect_leader(&self) {
-//         let nodes = self.nodes.lock().await;
-//         let mut lowest_mem = self.mem;
-//         let mut elected_node = self.id;
-
-//         for (_, node_info) in nodes.iter() {
-//             if node_info.mem < lowest_mem || (node_info.mem == lowest_mem && node_info.id < elected_node) {
-//                 lowest_mem = node_info.mem;
-//                 elected_node = node_info.id;
-//             }
-//         }
-
-//         let mut elected = self.elected.lock().await;
-//         *elected = self.id == elected_node;
-//         println!("Node {} is elected as leader: {}", self.id, *elected);
-//     }
-
-//     /// Handle an incoming connection, aggregate the data, process it, and send a response
-//     async fn handle_connection(self: Arc<Self>, data: Vec<u8>, size: usize, addr: SocketAddr) -> Result<()> {
-//         // Convert incoming bytes to a string to parse JSON
-//         let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&data[..size]);
-
-//         println!("Got request from {}: {}", addr, received_msg);
-
-//         if received_msg == "Request: Encrypt" {
-//             println!("Processing request from client: {}", addr);
-
-//             // Establish a connection to the client for sending responses
-//             let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
-//             println!("Established connection with client on {}", socket.local_addr()?);
-
-//             // Send "OK" message to the client to indicate we are ready to receive data
-//             socket.send_to(b"OK", &addr).await?;
-//             println!("Sent 'OK' message to {}", addr);
-
-//             // Buffer to receive chunks of data
-//             let mut buffer = [0u8; 1024];
-//             let mut aggregated_data = Vec::new(); // Aggregate the incoming data
-
-//             // Receive data in chunks from the client
-//             loop {
-//                 let (size, _) = socket.recv_from(&mut buffer).await?;
-//                 let received_data = String::from_utf8_lossy(&buffer[..size]);
-
-//                 // Check for the end of transmission message
-//                 if received_data == END_OF_TRANSMISSION {
-//                     println!("End of transmission from client {}", addr);
-//                     break;
-//                 }
-//                 // Append the received chunk to the aggregated_data buffer
-//                 aggregated_data.extend_from_slice(&buffer[..size]);
-//                 println!("Received chunk from {}: {} bytes", addr, size);
-//             }
-
-//             // Process the aggregated data
-//             let processed_data = self.process(aggregated_data).await;
-
-//             // Send the processed data back to the client in chunks
-//             let chunk_size = 1024; // Define chunk size for sending the response
-//             for chunk in processed_data.chunks(chunk_size) {
-//                 socket.send_to(chunk, &addr).await?;
-//                 println!("Sent chunk of {} bytes back to {}", chunk.len(), addr);
-//             }
-//             socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
-//             println!("Task for client done: {}", addr);
-//         }
-
-//         Ok(())
-//     }
-
-//     /// Retrieves the registered server nodes
-//     pub fn get_nodes(&self) -> HashMap<String, NodeInfo> {
-//         let copy = self.nodes.blocking_lock().clone();
-//         return copy;
-//     }
-
-//     async fn process(&self, data: Vec<u8>) -> Vec<u8> {
-//         let img_path = "files/to_encrypt.jpg";
-//         let output_path = "files/encrypted_output.png";
-    
-//         // Step 1: Write data bytes to a file (e.g., 'to_encrypt.png')
-//         let mut file = File::create(img_path).await.unwrap();
-//         file.write_all(&data).await.unwrap();
-    
-//         // Step 2: Call `server_encrypt_img` to perform encryption on the file
-//         server_encrypt_img("files/placeholder.jpg", img_path, output_path).await;
-    
-//         // Step 3: Read the encrypted output file as bytes
-//         let mut encrypted_file = File::open(output_path).await.unwrap();
-//         let mut encrypted_data = Vec::new();
-//         encrypted_file.read_to_end(&mut encrypted_data).await.unwrap();
-    
-//         // Return the encrypted data as the output
-//         return encrypted_data
-//     }
-// }
-
-
 use tokio::net::{UdpSocket, TcpStream, TcpListener};
 use tokio::sync::Mutex;
 use tokio::fs::File;
@@ -198,7 +9,7 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use std::io::Result;
 use std::time::{Duration, Instant};
-use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img};
+use crate::utils::{END_OF_TRANSMISSION, server_encrypt_img, send_with_retry};
 use rand::Rng; 
 
 
@@ -288,7 +99,7 @@ impl CloudNode {
 
 
         // Initial leader election and info retrieval
-        self.elect_leader().await;
+        self.elect_leader();
 
         let mut buffer = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
         loop {
@@ -298,7 +109,6 @@ impl CloudNode {
             let node = self.clone();
 
             let random_value = rand::thread_rng().gen_range(1..=10);
-
             // If the random value is 0, do something
             if random_value == 0 || *self.failed.lock().await  {  // start failure election
                 let mut failed = self.failed.lock().await;
@@ -326,7 +136,7 @@ impl CloudNode {
             }
 
             // perform election
-            self.elect_leader().await;
+            self.elect_leader();
 
             //  to check different services
             let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&packet[..size]);
@@ -358,6 +168,7 @@ impl CloudNode {
                 }
             }
             else if received_msg == "Request: UpdateInfo" {
+                println!("received UpdateInfo");
                 
                 tokio::spawn(async move {
                     if let Err(e) = node.handle_info_request(addr).await {
@@ -384,11 +195,17 @@ impl CloudNode {
         let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
     
         for (node_id, addr) in node_addresses {
-            let request_msg = "Request: UpdateInfo";
+            if addr == self.public_socket.local_addr().unwrap() {
+                continue;
+            }
+            let request_msg: &str = "Request: UpdateInfo";
             println!("sending getinfo to {}", addr);
     
             // Send the request to the node
-            socket.send_to(request_msg.as_bytes(), addr).await.expect("Failed to send request");
+            // TODO implement timeout and retrying, should we create our own send_to ?
+            send_with_retry(&socket, request_msg.as_bytes(), addr, 10).await.unwrap();
+            // socket.send_to(request_msg.as_bytes(), addr).await.expect("Failed to send request");
+            println!("sent UpdateInfo");
     
             // Buffer to hold the response
             let mut buffer = [0u8; 1024];
@@ -424,7 +241,8 @@ impl CloudNode {
         let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
 
         // Send the response back to the requesting node
-        socket.send_to(response.as_bytes(), addr).await?;
+        // socket.send_to(response.as_bytes(), addr).await?;
+        send_with_retry(&socket, response.as_bytes(), addr, 5).await?;
         println!("Sent info response to {}: {}", addr, response);
 
         Ok(())
@@ -480,7 +298,8 @@ impl CloudNode {
             println!("Established connection with client on {}", socket.local_addr()?);
 
             // Send "OK" message to the client to indicate we are ready to receive data
-            socket.send_to(b"OK", &addr).await?;
+            // socket.send_to(b"OK", &addr).await?;
+            send_with_retry(&socket, b"OK", addr, 5).await?;
             println!("Sent 'OK' message to {}", addr);
 
             // Buffer to receive chunks of data
@@ -508,7 +327,8 @@ impl CloudNode {
             // Send the processed data back to the client in chunks
             let chunk_size = 1024; // Define chunk size for sending the response
             for chunk in processed_data.chunks(chunk_size) {
-                socket.send_to(chunk, &addr).await?;
+                // socket.send_to(chunk, &addr).await?;
+                send_with_retry(&socket, chunk, addr, 5).await?;
                 println!("Sent chunk of {} bytes back to {}", chunk.len(), addr);
             }
             socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
@@ -553,7 +373,8 @@ impl CloudNode {
             );
         
             // Send the stats report back to the client
-            socket.send_to(stats_report.as_bytes(), &addr).await?;
+            // socket.send_to(stats_report.as_bytes(), &addr).await?;
+            send_with_retry(&socket, stats_report.as_bytes(), addr, 5).await?;
             println!("Sent stats report to client {}", addr);
         }
         Ok(())
