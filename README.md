@@ -2,9 +2,24 @@
 A Rust framework designed for distributed computing, focusing on both distributed cloud (client-service architecture) and peer-to-peer networking (to be implemented). The framework aims to provide a robust, high-performance, and fault-tolerant solution for building distributed applications with ease.
 
 ### TODO
+Phase 1: **DONE**
 - CMD args for ip tables
 - Tolerate failure during handle_connection()
 - Usecase on different machines
+
+Phase 2: **(CURRENT)**
+- In cloudnode, make file naming unique per socket, add hash prefix to filenames.
+- Figure out why Stegnography decryption sometimes fails, maybe add retry feature, or handle the error and count it in failures.
+- Add new services to CloudNode for the Directory of service. (adding data + reading data, in different tables defined by the cloudnode init, JSON formatted)
+- Figure out syncing the nodes tables (for election conherency, in case a new node joins in & for the Distributed Database)
+- Adding the permissions to encrypted data
+- Peer-to-Peer System:
+    - Fetching from directory of service & displaying the list of images, and their owners.
+    - Implement requesting and receiving data from peer.
+    - Implementing decryption & image viewing at the client.
+
+
+
 
 ### Directory Structure:
 ```
