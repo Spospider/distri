@@ -10,10 +10,11 @@ Phase 1: **DONE**
 Phase 2: **(CURRENT)**
 - In cloudnode, make file naming unique per socket, add hash prefix to filenames.
 - Figure out why Stegnography decryption sometimes fails, maybe add retry feature, or handle the error and count it in failures.
-- Add new services to CloudNode for the Directory of service. (adding data + reading data, in different tables defined by the cloudnode init, JSON formatted)
-- Figure out syncing the nodes tables (for election conherency, in case a new node joins in & for the Distributed Database)
-- Adding the permissions to encrypted data
+- Add new services to CloudNode for the Directory of service. (Adding data + reading data, in different tables defined by the cloudnode init, JSON formatted) **Ali   (DONE)**
+- Figure out syncing the nodes tables (for election conherency, in case a new node joins in & for the Distributed Database) **Ali**
+- Adding the permissions to encrypted image data. **Fekry**
 - Peer-to-Peer System:
+**Fekry**
     - Fetching from directory of service & displaying the list of images, and their owners.
     - Implement requesting and receiving data from peer.
     - Implementing decryption & image viewing at the client.

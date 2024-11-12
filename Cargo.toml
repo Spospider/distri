@@ -14,4 +14,6 @@ sha2 = "0.10"  # Use the latest compatible version
 steganography = "1.0.2"
 tokio = { version = "1", features = ["full"] }
 rand = "0.8.4"
+serde_json = "1.0.132"
+regex = "1.11.1"
 

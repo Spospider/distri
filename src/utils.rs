@@ -9,11 +9,12 @@ use tokio::time::{sleep, Duration, timeout};
 use std::net::SocketAddr;
 use std::io;
 use std::collections::HashMap;
+use regex::Regex;
 
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
-pub const DEFAULT_TIMEOUT: u64 = 10; // in seconds
+pub const DEFAULT_TIMEOUT: u64 = 5; // in seconds
 pub const RETRY_INTERVAL: u64 = 1; // in seconds
 
 pub const CHUNK_SIZE: usize = 1024; // in seconds
@@ -212,6 +213,7 @@ pub async fn send_reliable(
 
 
 pub async fn recv_reliable(socket: &UdpSocket) -> Result<(Vec<u8>, usize, SocketAddr), io::Error> {
+    // TODO add expected sender behaviour here
     let mut received_data: HashMap<u64, Vec<u8>> = HashMap::new(); // Store received chunks by sequence number
     let mut expected_sequence_number = 0u64;
     let mut buffer = vec![0u8; CHUNK_SIZE + 8]; // Buffer to receive chunk + sequence number
@@ -220,7 +222,7 @@ pub async fn recv_reliable(socket: &UdpSocket) -> Result<(Vec<u8>, usize, Socket
 
     loop {
         // Receive a chunk
-        let (size, addr) = socket.recv_from(&mut buffer).await?;
+        let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
         address = addr.clone();
         
         // Check if the chunk contains at least the sequence number (8 bytes)
@@ -241,13 +243,14 @@ pub async fn recv_reliable(socket: &UdpSocket) -> Result<(Vec<u8>, usize, Socket
         // If this chunk is what we expected, store it and update the expected sequence number
         if received_sequence_number == expected_sequence_number {
             received_data.insert(received_sequence_number, chunk.to_vec());
-            expected_sequence_number += 1;
             // println!("recv {} == expected {}", received_sequence_number, expected_sequence_number);
 
             // Check if this is the last chunk (indicated by empty data)
             if chunk == FINAL_MSG.as_bytes() {
                 break;
             }
+            expected_sequence_number += 1;
+
         } else {
             // println!("out of order");
             // println!("recv {} != expected {}", received_sequence_number, expected_sequence_number);
@@ -270,3 +273,18 @@ pub async fn recv_reliable(socket: &UdpSocket) -> Result<(Vec<u8>, usize, Socket
 
     Ok((complete_data, f_size, address))
 }
+
+
+pub fn extract_variable(input: &str) -> Result<String, io::Error> {
+    // Define a regex pattern to match text within < >
+    let re = Regex::new(r"<(.*?)>").unwrap();
+
+    // Apply the regex and capture the first group (the variable)
+    if let Some(captures) = re.captures(input) {
+        // Return the first captured group as a String
+        Ok(captures[1].to_string())
+    } else {
+        Err(io::Error::new(io::ErrorKind::Other, "No variable supplied"))
+    }
+}
+

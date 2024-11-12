@@ -2,9 +2,13 @@ use tokio::net::UdpSocket;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::error::Error;
-use tokio::fs::File;
-use crate::utils::{END_OF_TRANSMISSION, DEFAULT_TIMEOUT, server_decrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crate::utils::{
+    DEFAULT_TIMEOUT, 
+    send_with_retry, 
+    recv_with_timeout, 
+    recv_reliable, 
+    send_reliable
+};
 use tokio::time::Duration;
 
 
@@ -40,11 +44,9 @@ impl Client {
         self.nodes.insert(name, address);
     }
 
-    pub async fn send_data(&self, file_path: &str, service:&str) -> Result<(), Box<dyn Error>> {
-        
+    pub async fn send_data(&self, data: Vec<u8>, service:&str) -> Result<Vec<u8>, std::io::Error> {
         // Create a UDP socket for sending and receiving messages
         let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
-        
         let request_message = format!("Request: {}", service); // The message to be sent
 
         // Multicast the message to all nodes
@@ -68,44 +70,81 @@ impl Client {
         let mut buffer = [0u8; 1024];
 
         // Now, listen for the first response that comes back from any node
-        // let (size, addr) = socket.recv_from(&mut buffer).await?;
         let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
 
         let response = String::from_utf8_lossy(&buffer[..size]);
-        if response == "OK" {
-            println!("request for service accepted from {}", addr);
+        if !data.is_empty(){
+            if response == "OK" {
+                println!("request for service accepted from {}", addr);
 
-            // let mut send_buffer= vec![0u8; self.chunk_size];
+                send_reliable(&socket, &data, addr).await?;
 
-            // Send the image in chunks
-            // let mut chunk_index = 0;
-            let mut file = File::open(file_path).await?;
-            let mut data = Vec::new();
-            file.read_to_end(&mut data).await?;
-
-            // loop {
-            //     let n = file.read(&mut send_buffer).await?;
-            //     if n == 0 {
-            //         break; // EOF reached
-            //     }
-            //     // socket.send_to(&send_buffer[..n], &addr).await?;
-            //     send_with_retry(&socket, &send_buffer[..n], addr, 5).await?;
-            //     println!("Sent chunk {} of size {}", chunk_index, n);
-            //     chunk_index += 1;
-            // }
-            send_reliable(&socket, &data, addr).await?;
-
-            // Send end-of-image signal
-            // socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
-            // send_with_retry(&socket, END_OF_TRANSMISSION.as_bytes(), addr, 5).await?;
-            // println!("End of image signal sent.");
-
-            // start receiving result
-            self.await_result(socket, addr).await;
+                // start receiving result
+                let result = self.await_result(socket, addr).await;
+                return Ok(result?)
+            }
+            
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "Send request not accepted."))
+        } else {
+            // return response directy
+            return Ok(buffer[..size].to_vec());
         }
-        
+    }
 
-        Ok(())
+    pub async fn send_data_with_params(
+        &self, 
+        data: Vec<u8>, 
+        service: &str, 
+        params: Vec<&str>
+    ) -> Result<Vec<u8>, std::io::Error> {
+        // Create a UDP socket for sending and receiving messages
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
+    
+        // Build the parameterized request message
+        let param_string = params.join(","); // Combine parameters into a comma-separated string
+        let request_message = format!("Request: {}<{}>", service, param_string); // Format request message
+    
+        // Multicast the message to all nodes
+        for node_addr in self.nodes.values() {
+            let node_addr = node_addr.clone(); // Clone the address
+            println!("Sending request to {}", node_addr);
+    
+            // Send the request message with retries
+            match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
+                Ok(_) => {
+                    println!("Request message sent to {}", node_addr);
+                }
+                Err(e) => {
+                    eprintln!("Failed to send message to {}: {:?}", node_addr, e);
+                }
+            }
+        }
+    
+        // Buffer for receiving data
+        let mut buffer = [0u8; 1024];
+    
+        // Listen for the first response from any node
+        let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+    
+        let response = String::from_utf8_lossy(&buffer[..size]);
+        if !data.is_empty(){
+            // if there is data to send, expect Ok message first
+            if response == "OK" {
+                println!("Request for service accepted from {}", addr);
+            
+                // Send the file data reliably
+                send_reliable(&socket, &data, addr).await?;
+        
+                // Start receiving the result
+                let result = self.await_result(socket, addr).await;
+                return Ok(result?);
+            }
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "Send request not accepted."))
+        } else {
+            // return response directy
+            return Ok(buffer[..size].to_vec());
+        }
+    
     }
 
 
@@ -114,6 +153,8 @@ impl Client {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
         
         let request_message = "Request: Stats"; // Message to send for collecting stats
+
+        let mut buffer = [0u8; 65535];
 
         // Send the request message to all nodes
         for node_addr in self.nodes.values() {
@@ -125,76 +166,49 @@ impl Client {
                 }
                 Err(e) => {
                     eprintln!("Failed to send stats request to {}: {:?}", node_addr, e);
+                    continue;
                 }
             }
+            // Await response
+            let _ = match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
+                Ok((size, addr)) => {
+                    let response = String::from_utf8_lossy(&buffer[..size]);
+                    println!("Received response from {}: {}", addr, response);
+                }
+                Err(e) => {
+                    eprintln!("No Stats response from {}: {:?}", node_addr, e);
+                    continue;
+                }
+            };
+            
         }
 
         // Set up a buffer to receive responses
-        let mut buffer = [0u8; 65535];
 
         // Loop to collect and print responses from each server
-        for _ in 0..self.nodes.len() {
-            // let (size, addr) = socket.recv_from(&mut buffer).await?;
+        // for _ in 0..self.nodes.len() {
+        //     // let (size, addr) = socket.recv_from(&mut buffer).await?;
 
-            let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
-            let response = String::from_utf8_lossy(&buffer[..size]);
-            println!("Received response from {}: {}", addr, response);
-        }
+        //     let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+        //     let response = String::from_utf8_lossy(&buffer[..size]);
+        //     println!("Received response from {}: {}", addr, response);
+        // }
 
         Ok(())
     }
 
 
-    async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) {
-        // Receive the steganography result (image with hidden content) from the server
-        // let mut output_image_data = Vec::new();
-        // let mut buffer: Vec<u8> = vec![0u8; self.chunk_size];
-        let (output_image_data, n, _addr) = recv_reliable(&socket).await.unwrap(); // add sender to verify its from same
-
-        // loop {
-        //     // let (n, _addr) = socket.recv_from(&mut buffer).await.unwrap();
-        //     let (n, _addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await.unwrap();
-        //     if _addr != sender {
-        //         // ignore packets from other senders
-        //         continue;
-        //     }
-        //     if &buffer[..n] == END_OF_TRANSMISSION.as_bytes() {
-        //         println!("End of transmission signal received.");
-        //         break;
-        //     }
-
-        //     output_image_data.extend_from_slice(&buffer[..n]);
-        //     println!("Received chunk of size {}", n);
-        // }
-
-        // Write the received image with hidden data to a file
-        // let mut output_image_file = File::create("files/received_with_hidden.png").await.unwrap();
-        // output_image_file.write_all(&output_image_data).await.unwrap();
-        // println!("Received image with hidden data saved as 'files/received_with_hidden.png'.");
-        match File::create("files/received_with_hidden.png").await {
-            Ok(mut output_image_file) => {
-                if let Err(e) = output_image_file.write_all(&output_image_data).await {
-                    eprintln!("Failed to write received image with hidden data to file: {}", e);
-                } else {
-                    println!("Received image with hidden data saved as 'files/received_with_hidden.png'.");
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to create file for received image with hidden data: {}", e);
-            }
+    async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) -> Result<Vec<u8>, std::io::Error>  {
+        let (data, _, addr) = recv_reliable(&socket).await.unwrap(); // Adjust for proper error handling if necessary.
+    
+        if addr != sender {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Received data from unexpected sender",
+            ));
         }
 
-
-        // Extract the hidden image from the received image
-        // server_decrypt_img("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await;
-        // println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'.");
-        match server_decrypt_img("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await {
-            Ok(_) => {
-                println!("Hidden image extracted and saved as 'files/extracted_hidden_image.jpg'.");
-            }
-            Err(e) => {
-                eprintln!("Failed to extract hidden image: {}", e);
-            }
-        }
+        Ok(data)
     }
+    
 }

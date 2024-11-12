@@ -9,3 +9,6 @@ tokio = { version = "1.41.0", features = ["full"] }
 distri = { path = "../" }  # Path to your custom library
 rand = { version = "0.8.5", features = ["std_rng"] }
 clap = {version = "4.5.9", features = ["derive"]}
+serde_json = "1.0.132"
+base64 = "0.22.1"
+regex = "1.11.1"
