@@ -132,7 +132,8 @@ async fn main() {
                         "dimentions" : "value",
                         "thumbnail" : "value"
                     }
-                }
+                },
+                "provider" : "127.0.0.1:1234"
             }); 
             // converted to an array of bytes
             let client_catalogue_bytes = to_vec(&client_catalogue).expect("Failed to serialize JSON");
@@ -145,9 +146,8 @@ async fn main() {
             println!("Reading directory of service...");
             // Read directory of service
             let params = vec!["catalog"];
-            let result = client.send_data_with_params(Vec::new(), "ReadTable", params).await.unwrap();
-            println!("{}", String::from_utf8_lossy(&result));
-
+            let result = client.send_data_with_params(Vec::new(), "ReadCollection", params).await.unwrap();
+            println!("Directory of Service Received:\n{}", String::from_utf8_lossy(&result));
 
             // Optionally gather stats if `report` flag is set
             if report {

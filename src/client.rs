@@ -154,7 +154,7 @@ impl Client {
         
         let request_message = "Request: Stats"; // Message to send for collecting stats
 
-        let mut buffer = [0u8; 65535];
+        
 
         // Send the request message to all nodes
         for node_addr in self.nodes.values() {
@@ -169,6 +169,7 @@ impl Client {
                     continue;
                 }
             }
+            let mut buffer = [0u8; 65535];
             // Await response
             let _ = match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                 Ok((size, addr)) => {
@@ -199,7 +200,7 @@ impl Client {
 
 
     async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) -> Result<Vec<u8>, std::io::Error>  {
-        let (data, _, addr) = recv_reliable(&socket).await.unwrap(); // Adjust for proper error handling if necessary.
+        let (data, _, addr) = recv_reliable(&socket, None).await.unwrap(); // Adjust for proper error handling if necessary.
     
         if addr != sender {
             return Err(std::io::Error::new(

@@ -1,0 +1,1 @@
+// implement peer class here, keeping the client purely for communication with the cloud

@@ -14,7 +14,7 @@ use regex::Regex;
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
-pub const DEFAULT_TIMEOUT: u64 = 5; // in seconds
+pub const DEFAULT_TIMEOUT: u64 = 15; // in seconds
 pub const RETRY_INTERVAL: u64 = 1; // in seconds
 
 pub const CHUNK_SIZE: usize = 1024; // in seconds
@@ -173,7 +173,7 @@ pub async fn send_reliable(
                     let received_sequence_number = u64::from_be_bytes(ack_buffer);
                     if received_sequence_number == sequence_number {
                         ack_received = true;
-                        println!("Received ACK for sequence number {}", sequence_number);
+                        // println!("Received ACK for sequence number {}", sequence_number);
                     }
                 }
                 Ok(_) => {
@@ -212,7 +212,7 @@ pub async fn send_reliable(
 }
 
 
-pub async fn recv_reliable(socket: &UdpSocket) -> Result<(Vec<u8>, usize, SocketAddr), io::Error> {
+pub async fn recv_reliable(socket: &UdpSocket, duration:Option<Duration>) -> Result<(Vec<u8>, usize, SocketAddr), io::Error> {
     // TODO add expected sender behaviour here
     let mut received_data: HashMap<u64, Vec<u8>> = HashMap::new(); // Store received chunks by sequence number
     let mut expected_sequence_number = 0u64;
@@ -222,7 +222,7 @@ pub async fn recv_reliable(socket: &UdpSocket) -> Result<(Vec<u8>, usize, Socket
 
     loop {
         // Receive a chunk
-        let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+        let (size, addr) = recv_with_timeout(&socket, &mut buffer, duration.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT))).await?;
         address = addr.clone();
         
         // Check if the chunk contains at least the sequence number (8 bytes)
@@ -273,6 +273,7 @@ pub async fn recv_reliable(socket: &UdpSocket) -> Result<(Vec<u8>, usize, Socket
 
     Ok((complete_data, f_size, address))
 }
+
 
 
 pub fn extract_variable(input: &str) -> Result<String, io::Error> {

@@ -18,7 +18,7 @@ use serde_json::{value, Value};
 
 #[derive(Clone)]
 pub struct NodeInfo {
-    pub load: u16,
+    pub load: i32,
     pub id: u16,
     pub addr: SocketAddr,
 }
@@ -29,8 +29,9 @@ pub struct CloudNode {
     public_socket: Arc<UdpSocket>,
     chunk_size: Arc<usize>,
     elected: Arc<Mutex<bool>>,   // Elected state wrapped in Mutex for safe mutable access
+    electing: Arc<Mutex<bool>>,   // State for when election is taking place.
     failed: Arc<Mutex<bool>>,
-    load: Arc<Mutex<u16>>,
+    load: Arc<Mutex<i32>>,
     id: Arc<Mutex<u16>>, // is the port of the addr, server ports have to be unique
     // internal_socket: Arc<UdpSocket>,
     
@@ -43,6 +44,7 @@ pub struct CloudNode {
 
     // Distributed DB 
     tables: Arc<Mutex<HashMap<String, Vec<Value>>>>,
+    db_data_version: Arc<Mutex<u32>>,
 
     
 }
@@ -91,6 +93,7 @@ impl CloudNode {
             public_socket: Arc::new(socket),
             chunk_size:Arc::new(chunk_size),
             elected: Arc::new(Mutex::new(elected)),
+            electing: Arc::new(Mutex::new(false)),
             failed: Arc::new(Mutex::new(failed)),
             load: Arc::new(Mutex::new(0)),
             id: Arc::new(Mutex::new(address.port())),
@@ -104,6 +107,7 @@ impl CloudNode {
 
             // Distributed DB
             tables: Arc::new(Mutex::new(tables)),
+            db_data_version: Arc::new(Mutex::new(0)),
         }))
     }
 
@@ -112,7 +116,8 @@ impl CloudNode {
         println!("Listening for incoming info requests on {:?}", self.public_socket.local_addr());
 
         // Initial leader election and info retrieval
-        let _ = self.elect_leader();
+        // *self.electing.lock().await = false;
+        self.elect_leader();
 
         let mut buffer = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
         loop {
@@ -174,19 +179,22 @@ impl CloudNode {
             }
             println!("looping4");
             // perform election
-            let _ = self.elect_leader();
+            // *self.electing.lock().await = true;
+            self.elect_leader();            
+            
             println!("looping5");
             //  to check different services
             let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&packet[..size]);
             println!("looping6");
-            if received_msg == "Request: Stats"  || *self.elected.lock().await { // only if elected, or its a stats request
+            // Stats msgs and updateInfo msgs pass directly
+            if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || (*self.elected.lock().await) { // only if elected, or its a stats request
+                let node = self.clone();
                 if received_msg == "Request: Encrypt"  {
                         println!("looping7");
                         *self.accepted.lock().await += 1;
 
                         // Spawn a task to handle the connection and data processing
                         println!("looping8");
-                        let node = self.clone();
                         tokio::spawn(async move {
                             let start_time = Instant::now(); // Record start time
                             if let Err(e) = node.handle_encryption(addr).await {
@@ -204,16 +212,15 @@ impl CloudNode {
                 else if received_msg == "Request: Stats"  {
                     println!("looping9");
                     // Spawn a task to handle the connection and data processing
-                    let node = self.clone();
                     tokio::spawn(async move {
-                        let start_time = Instant::now(); // Record start time
+                        // let start_time = Instant::now(); // Record start time
                         if let Err(e) = node.handle_stats(addr).await {
                             eprintln!("Error handling Stats: {:?}", e);
-                            *node.failures.lock().await += 1; 
+                            // *node.failures.lock().await += 1; 
                         }
                         else{
-                            let elapsed: Duration = start_time.elapsed();
-                            *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
+                            // let elapsed: Duration = start_time.elapsed();
+                            // *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
                             println!("Stats Done for {}", addr);
                         }
 
@@ -228,11 +235,11 @@ impl CloudNode {
                 }
 
                 // Distributed DB stuff
-                else if received_msg == "Request: AddTable" {
+                else if received_msg == "Request: AddCollection" {
                     if let Err(e) = self.db_add_table(addr).await {
                         eprintln!("Error handling add table service: {:?}", e);
                     } else {
-                        println!("AddTable Done for {}", addr);
+                        println!("AddCollection Done for {}", addr);
                     }
                 }
                 else if received_msg.starts_with("Request: AddDocument") {  // only check the first part of "Request: AddDocument<tablename>"
@@ -242,11 +249,18 @@ impl CloudNode {
                         println!("AddDocument Done for {}", addr);
                     }
                 }
-                else if received_msg.starts_with("Request: ReadTable") { // only check the first part of "Request: ReadTable<tablename>"
+                else if received_msg.starts_with("Request: DeleteDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                    if let Err(e) = self.db_delete_entry(&received_msg.clone(), addr).await {
+                        eprintln!("Error handling delete doc service: {:?}", e);
+                    } else {
+                        println!("DeleteDocument Done for {}", addr);
+                    }
+                }
+                else if received_msg.starts_with("Request: ReadCollection") { // only check the first part of "Request: ReadCollection<tablename>"
                     if let Err(e) = self.db_read_table(&received_msg.clone(), addr).await {
                         eprintln!("Error handling read table service: {:?}", e);
                     } else {
-                        println!("ReadTable Done for {}", addr);
+                        println!("ReadCollection Done for {}", addr);
                     }
                 }
             }
@@ -272,25 +286,24 @@ impl CloudNode {
             }
             let request_msg: &str = "Request: UpdateInfo";
             println!("sending getinfo to {}", addr);
+
+            *self.load.lock().await = self.completed.lock().await.clone() as i32 - self.accepted.lock().await.clone() as i32;
     
             // Send the request to the node
-            // TODO implement timeout and retrying, should we create our own send_to ?
             send_with_retry(&socket, request_msg.as_bytes(), addr, 10).await.unwrap();
-            // socket.send_to(request_msg.as_bytes(), addr).await.expect("Failed to send request");
             println!("sent UpdateInfo");
     
             // Buffer to hold the response
             let mut buffer = [0u8; 1024];
             
             // Receive the response from the node
-            // match socket.recv_from(&mut buffer).await {
             match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                 Ok((size, _)) => {
-                    let updated_mem:u16 = buffer[..size].get(0).copied().unwrap_or(0).into();
+                    let updated_load:i32 = buffer[..size].get(0).copied().unwrap_or(0).into();
     
                     let mut nodes = self.nodes.lock().await;
                     if let Some(node_info) = nodes.get_mut(&node_id) {
-                        node_info.load = updated_mem;
+                        node_info.load = updated_load;
                         println!("Updated info for node {}: load = {}", node_info.id, node_info.load);
                     }
                 },
@@ -324,24 +337,27 @@ impl CloudNode {
      
     async fn elect_leader(self: &Arc<Self>) {
         // let clone = self.clone();
+        let mut elected = *self.elected.lock().await;
         
         // *elected = false; // Reset election state initially
         self.get_info().await; // Retrieve updated info from all nodes
-        let mut elected = self.elected.lock().await;
-        *elected = self.election_alg().await; // Elect a leader based on load and id values
+        
+        elected = self.election_alg().await; // Elect a leader based on load and id values
         println!("elected value: {}", elected);
+        // *self.electing.lock().await = false;
     }
 
     async fn election_alg(self: &Arc<Self>) -> bool {
         println!("election1");
         let nodes = self.nodes.lock().await;
-        let mut lowest_mem = *self.load.lock().await;
+        let mut lowest_load = *self.load.lock().await;
         let mut elected_node = *self.id.lock().await;
         println!("election2");
 
         for (_, node_info) in nodes.iter() {
-            if node_info.load < lowest_mem || (node_info.load == lowest_mem && node_info.id < elected_node) {
-                lowest_mem = node_info.load;
+            // if node_info.load < lowest_load || (node_info.load == lowest_load && node_info.id < elected_node) {
+            if node_info.id < elected_node {
+                lowest_load = node_info.load;
                 elected_node = node_info.id;
             }
         }
@@ -351,9 +367,7 @@ impl CloudNode {
         // *elected = self.id == elected_node;
         let elected = *self.id.lock().await == elected_node;
         println!("elected node: {}", elected_node);
-        // println!("Node {} is elected as leader: {} with load={}", self.id, *elected, self.load);
-        return elected;
-        
+        return elected;        
     }
   
  // end election stuff
@@ -375,7 +389,7 @@ impl CloudNode {
         send_with_retry(&socket, b"OK", addr, 5).await?;
         println!("Sent 'OK' message for Encrypt to {}", addr);
 
-        let (aggregated_data, _, _) = recv_reliable(&socket).await?;
+        let (aggregated_data, _, _) = recv_reliable(&socket, Some(Duration::from_secs(1))).await?;
 
         // Process the aggregated data
         let processed_data = self.process_img(aggregated_data).await;
@@ -386,7 +400,7 @@ impl CloudNode {
         println!("Task for client done: {}", addr);
         *self.completed.lock().await += 1;
         // }
-        println!("done handling connection for: {}", addr);
+        println!("Done handling Encrypt for: {}", addr);
         Ok(())
     }
 
@@ -471,12 +485,12 @@ impl CloudNode {
         // send ok
         let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         send_with_retry(&socket, b"OK", addr, 5).await?;
-        println!("Sent 'OK' message for AddTable to {}", addr);
+        println!("Sent 'OK' message for AddCollection to {}", addr);
         
         // receive data
         // Loop to ensure we get data from the correct client
         for _ in 0..5 {
-            let (packet, _, _) = match recv_reliable(&socket).await {
+            let (packet, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     // Successfully received data from the correct client
                     let table_name: &str = &String::from_utf8_lossy(&packet);
@@ -489,6 +503,8 @@ impl CloudNode {
                         return Ok(Some(response));
                     } else {
                         tables.insert(table_name.to_string(), Vec::new());
+                        // update data version with any change in DB
+                        *self.db_data_version.lock().await += 1;
                         // reply to sender
                         let response = format!("Table '{}' created.", table_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
@@ -520,25 +536,14 @@ impl CloudNode {
 
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
 
-        // Check if the table_name exists in self.table_names
-        // let tables = self.tables.lock().await;
-        // if !tables.contains_key(table_name) {
-        //     // Table does not exist, send error to client
-        //     send_with_retry(&socket, b"Error: Table Does not Exist", addr, 5).await?;
-        //     return Err(Error::new(ErrorKind::Other, "Add entry: table does not exist"));
-        // }
-
-
         // send ok
         send_with_retry(&socket, b"OK", addr, 5).await?;
         println!("Sent 'OK' message for AddEntry to {}", addr);
 
-
         // recieve data
-        // let mut buffer = [0u8; 1024];
         // Loop to ensure we get data from the correct client
         for _ in 0..5 {
-            let (packet, _, _) = match recv_reliable(&socket).await {
+            let (packet, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     // let packet: [u8] = buffer[..size].to_vec();
                     let packet = packet[..size].to_vec();
@@ -556,18 +561,110 @@ impl CloudNode {
                         }
                     };
                     
-                    // Add the "provider" field with the client's address
-                    if let Value::Object(ref mut obj) = entry {
-                        obj.insert("provider".to_string(), Value::String(addr.to_string()));
-                    }
+                    // // Add the "provider" field with the client's address // provider should be done by lient so that he puts his own port to receive peer requests.
+                    // if let Value::Object(ref mut obj) = entry {
+                    //     obj.insert("provider".to_string(), Value::String(addr.ip().to_string()));
+                    // }
 
                     let mut tables = self.tables.lock().await;
                     if let Some(table) = tables.get_mut(table_name) {
                         table.push(entry);
+                        // update data version with any change in DB
+                        *self.db_data_version.lock().await += 1;
                         println!("Added Doc: {}", data);
 
                         // reply to sender
                         let response = "Entry added successfully.".to_string();
+                        send_reliable(&socket, response.as_bytes(), addr).await?;
+                        return Ok(response);
+                    } else {
+                        // reply to sender
+                        let response = format!("Table '{}' does not exist.", table_name);
+                        send_reliable(&socket, response.as_bytes(), addr).await?;
+                        return Ok(response);
+                    }
+
+                }, // Successfully received data
+                Ok((_, _, recv_addr)) => {
+                    eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                    // Ignore and continue to wait for correct address
+                    (0, 0, recv_addr)
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    eprintln!("Receive operation timed out");
+                    return Err(Error::new(ErrorKind::Other, "Receive operation timed out"));
+                },
+                Err(e) => {
+                    eprintln!("Failed to receive data: {:?}", e);
+                    return Err(Error::new(ErrorKind::Other, "No variable supplied"));
+                }
+            };
+        }
+        return Err(Error::new(ErrorKind::Other, "Client did not communicate"));
+    }
+    
+    // Add an entry to a specific table
+    async fn db_delete_entry(&self, received_msg: &str,  addr: SocketAddr) -> Result<String> { // change to option so that ? delegates errors to above function
+        // Process input var
+        let table_name = &extract_variable(&received_msg)?;
+
+        let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
+
+        // send ok
+        send_with_retry(&socket, b"OK", addr, 5).await?;
+        println!("Sent 'OK' message for AddEntry to {}", addr);
+
+        // recieve data
+        // Loop to ensure we get data from the correct client
+        for _ in 0..5 {
+            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
+                Ok((packet, size, recv_addr)) if recv_addr == addr => {
+                    // let packet: [u8] = buffer[..size].to_vec();
+                    let packet = packet[..size].to_vec();
+                    let data: String = String::from_utf8_lossy(&packet).trim().to_string();
+                    
+                    let entry: Value = match serde_json::from_slice(&packet) {
+                        Ok(value) => value, // Only proceed if it's an object
+                        Err(e) => {
+                            eprintln!("Failed to parse JSON: {:?}", e);
+
+                            // reply to sender
+                            let response = format!("Error:Failed to parse JSON: {:?}", e);
+                            send_reliable(&socket, response.as_bytes(), addr).await?;
+                            return Err(Error::new(ErrorKind::Other, "Failed to parse JSON"));
+                        }
+                    };
+
+                    // Ensure `entry` is a JSON object for matching
+                    let entry_object = match entry.as_object() {
+                        Some(obj) => obj,
+                        None => {
+                            let response = format!("Error:Entry is not a JSON object {:?}", entry);
+                            send_reliable(&socket, response.as_bytes(), addr).await?;
+                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Entry must be a JSON object"));
+                        }
+                    };
+                    
+                    let mut tables = self.tables.lock().await;
+                    if let Some(table) = tables.get_mut(table_name) {
+                        // entry represents dict on fields to match on 
+                        // example: { "provider" : "abc" }
+
+                        // Retain only entries that do NOT match all the fields in `entry_object`
+                        table.retain(|existing_entry| {
+                            !existing_entry.as_object().map_or(false, |existing_fields| {
+                                entry_object.iter().all(|(key, value)| {
+                                    existing_fields.get(key) == Some(value)
+                                })
+                            })
+                        });
+
+                        // update data version with any change in DB
+                        *self.db_data_version.lock().await += 1;
+                        println!("Deleted Docs matching: {}", entry);
+
+                        // reply to sender
+                        let response = "Docs deleted successfully.".to_string();
                         send_reliable(&socket, response.as_bytes(), addr).await?;
                         return Ok(response);
                     } else {
