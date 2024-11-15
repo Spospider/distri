@@ -52,7 +52,7 @@ async fn main() {
             // Initialize server and other nodes in the network
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
             for (i, addr) in other_ips.iter().enumerate() {
-                node_map.insert(format!("Server{}", i + 1), *addr);
+                node_map.insert(addr.port().to_string(), *addr);
             }
 
             // define DB tables for directory of service

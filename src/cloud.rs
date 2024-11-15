@@ -11,7 +11,9 @@ use std::io::Result;
 use std::time::{Duration, Instant};
 use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable, extract_variable};
 use rand::Rng; 
-use serde_json::{value, Value};
+use serde_json::{json, Value, to_string};
+use colored::*; // Import the trait for coloring
+
 
 
 
@@ -29,13 +31,13 @@ pub struct CloudNode {
     public_socket: Arc<UdpSocket>,
     chunk_size: Arc<usize>,
     elected: Arc<Mutex<bool>>,   // Elected state wrapped in Mutex for safe mutable access
-    electing: Arc<Mutex<bool>>,   // State for when election is taking place.
     failed: Arc<Mutex<bool>>,
     load: Arc<Mutex<i32>>,
     id: Arc<Mutex<u16>>, // is the port of the addr, server ports have to be unique
     // internal_socket: Arc<UdpSocket>,
     
     // For stats
+    requests:Arc<Mutex<u32>>,
     accepted:Arc<Mutex<u32>>,
     completed:Arc<Mutex<u32>>,
     failed_number_of_times:Arc<Mutex<u32>>,
@@ -93,12 +95,12 @@ impl CloudNode {
             public_socket: Arc::new(socket),
             chunk_size:Arc::new(chunk_size),
             elected: Arc::new(Mutex::new(elected)),
-            electing: Arc::new(Mutex::new(false)),
             failed: Arc::new(Mutex::new(failed)),
             load: Arc::new(Mutex::new(0)),
             id: Arc::new(Mutex::new(address.port())),
           
             // Stats init
+            requests: Arc::new(Mutex::new(0)),
             accepted: Arc::new(Mutex::new(0)),
             completed: Arc::new(Mutex::new(0)),
             failed_number_of_times: Arc::new(Mutex::new(0)),
@@ -115,9 +117,6 @@ impl CloudNode {
     pub async fn serve(self: &Arc<Self>) -> Result<()> {
         println!("Listening for incoming info requests on {:?}", self.public_socket.local_addr());
 
-        // Initial leader election and info retrieval
-        // *self.electing.lock().await = false;
-        self.elect_leader();
 
         let mut buffer = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
         loop {
@@ -178,23 +177,29 @@ impl CloudNode {
                 }
             }
             println!("looping4");
-            // perform election
-            // *self.electing.lock().await = true;
-            self.elect_leader();            
-            
-            println!("looping5");
-            //  to check different services
             let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&packet[..size]);
-            println!("looping6");
+
+            // perform election
+            // Avoid infinite electing
+            if received_msg != "Request: Stats"  && received_msg != "Request: UpdateInfo" {
+                // count new request for service
+                *self.requests.lock().await += 1;
+
+                let node = self.clone();
+                tokio::spawn(async move {
+                    node.elect_leader().await;
+                });
+            }
+            println!("looping5");
             // Stats msgs and updateInfo msgs pass directly
             if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || (*self.elected.lock().await) { // only if elected, or its a stats request
                 let node = self.clone();
                 if received_msg == "Request: Encrypt"  {
-                        println!("looping7");
+                        println!("looping6");
                         *self.accepted.lock().await += 1;
 
                         // Spawn a task to handle the connection and data processing
-                        println!("looping8");
+                        println!("looping7");
                         tokio::spawn(async move {
                             let start_time = Instant::now(); // Record start time
                             if let Err(e) = node.handle_encryption(addr).await {
@@ -210,7 +215,7 @@ impl CloudNode {
                         });
                 }
                 else if received_msg == "Request: Stats"  {
-                    println!("looping9");
+                    println!("looping8");
                     // Spawn a task to handle the connection and data processing
                     tokio::spawn(async move {
                         // let start_time = Instant::now(); // Record start time
@@ -285,13 +290,11 @@ impl CloudNode {
                 continue;
             }
             let request_msg: &str = "Request: UpdateInfo";
-            println!("sending getinfo to {}", addr);
-
-            *self.load.lock().await = self.completed.lock().await.clone() as i32 - self.accepted.lock().await.clone() as i32;
+            println!("{} {}", "sending getinfo to".yellow(), addr);
     
             // Send the request to the node
             send_with_retry(&socket, request_msg.as_bytes(), addr, 10).await.unwrap();
-            println!("sent UpdateInfo");
+            println!("{}", "sent UpdateInfo".yellow());
     
             // Buffer to hold the response
             let mut buffer = [0u8; 1024];
@@ -299,30 +302,65 @@ impl CloudNode {
             // Receive the response from the node
             match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                 Ok((size, _)) => {
-                    let updated_load:i32 = buffer[..size].get(0).copied().unwrap_or(0).into();
+                    let data = &buffer[..size];
+                    // convert data to json
+                    // Convert data to JSON
+                    let json_obj: Value = match serde_json::from_slice(data) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            eprintln!("CRITICAL: Failed to parse JSON in getinfo: {:?}", e);
+                            return; // Handle the error appropriately, e.g., skip processing this data
+                        }
+                    };
+
+                    // let updated load = json_obj['load']
+                    let updated_load:i32 = json_obj.get("load").unwrap().as_i64().unwrap() as i32;
     
                     let mut nodes = self.nodes.lock().await;
                     if let Some(node_info) = nodes.get_mut(&node_id) {
                         node_info.load = updated_load;
-                        println!("Updated info for node {}: load = {}", node_info.id, node_info.load);
+                        let msg = format!("Updated info for node {}: load = {}", node_info.id, node_info.load);
+                        println!("{}", msg.yellow());
                     }
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    eprintln!("getinfo operation timed out");
+                    eprintln!("{}", "getinfo operation timed out".yellow());
                 },
                 Err(e) => {
                     eprintln!("Failed to receive response from {}: {:?}", addr, e);
                 }
             }
         }
+        
+        
     }
 
     /// Handles incoming TCP requests for node information
     async fn handle_info_request(self: &Arc<Self>, addr: SocketAddr) -> Result<()> {
         println!("Received info request from {}", addr);
 
-        let load = self.completed.lock().await.clone() - self.accepted.lock().await.clone(); // order is reversedd as the min value is selected
-        let response = format!("{} {}", load, self.id.lock().await); // self.load.lock().await
+        let load = *self.completed.lock().await as i32 - *self.requests.lock().await as i32; // order is reversedd as the min value is selected
+        // update own load, in var and in node table
+        *self.load.lock().await = load;
+        let myid = self.id.lock().await.clone().to_string();
+        let mut nodes = self.nodes.lock().await;
+        if let Some(node_info) = nodes.get_mut(&myid) {
+            node_info.load = load;
+        }
+
+        // let response = format!("{} {}", load, myid);
+        let response = to_string(&json!({
+            "load": load,
+            "id": myid,
+            "collections": self.tables.lock().await.clone()
+        })).unwrap();
+        // let response = json structure with:
+        // {
+        //     'load' : load,
+        //     'id' : myid,
+        //     'collections' : self.tables
+        // }
+        // where self.tables is a hashmap of strings to a list of json Value objects
         let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
 
         // Send the response back to the requesting node
@@ -336,37 +374,41 @@ impl CloudNode {
     /// Elects the leader node based on the lowest load value, breaking ties with the lowest id
      
     async fn elect_leader(self: &Arc<Self>) {
-        // let clone = self.clone();
-        let mut elected = *self.elected.lock().await;
+        // let cloelect_leaderne = self.clone();
+        println!("{}", "elect_leader1".yellow());
+        let mut elected = self.elected.lock().await;
         
         // *elected = false; // Reset election state initially
+        println!("{}", "elect_leader2".yellow());
         self.get_info().await; // Retrieve updated info from all nodes
+        println!("{}", "elect_leader3".yellow());
         
-        elected = self.election_alg().await; // Elect a leader based on load and id values
-        println!("elected value: {}", elected);
+        *elected = self.election_alg().await; // Elect a leader based on load and id values
+        println!("{} {}","elected value:".yellow(), elected);
         // *self.electing.lock().await = false;
     }
 
     async fn election_alg(self: &Arc<Self>) -> bool {
-        println!("election1");
+        println!("{}", "election1".yellow());
         let nodes = self.nodes.lock().await;
-        let mut lowest_load = *self.load.lock().await;
-        let mut elected_node = *self.id.lock().await;
-        println!("election2");
+        let mut lowest_load = self.load.lock().await.clone();
+        let mut elected_node = self.id.lock().await.clone();
+        println!("{}", "election2".yellow());
 
         for (_, node_info) in nodes.iter() {
-            // if node_info.load < lowest_load || (node_info.load == lowest_load && node_info.id < elected_node) {
-            if node_info.id < elected_node {
+            
+            println!("Comparing {} : {}", node_info.load, lowest_load);
+            println!("Comparing ids {} : {}", node_info.id, elected_node);
+            if node_info.load < lowest_load || (node_info.load == lowest_load && node_info.id < elected_node) {
+            // if node_info.id < elected_node {
                 lowest_load = node_info.load;
                 elected_node = node_info.id;
             }
         }
-        println!("election3");
+        println!("{}", "election3".yellow());
 
-        // let mut elected = self.elected.lock().await;
-        // *elected = self.id == elected_node;
         let elected = *self.id.lock().await == elected_node;
-        println!("elected node: {}", elected_node);
+        println!("{} {}","elected node:".yellow(), elected_node);
         return elected;        
     }
   

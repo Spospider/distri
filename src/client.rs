@@ -52,7 +52,6 @@ impl Client {
         // Multicast the message to all nodes
         for node_addr in self.nodes.values() {
             let node_addr = node_addr.clone(); // Clone the address
-            println!("sending request to  {}", node_addr);
 
             // match socket.send_to(request_message.as_bytes(), &node_addr).await {
             match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
