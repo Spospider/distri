@@ -4,7 +4,8 @@ use distri::cloud::CloudNode;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 use std::collections::HashSet;
 use serde_json::json;
 use serde_json::to_vec;
@@ -92,6 +93,7 @@ async fn main() {
             let mut failures = 0;
 
             // Load test: Send 10_000 requests
+            let start_time = Instant::now();
             for _ in 0..10 {
                 // Read the file data to be sent
                 let mut file = File::open(file_path).await.unwrap();
@@ -116,7 +118,7 @@ async fn main() {
                         failures += 1;
                     }
                 }
-                sleep(Duration::from_millis(50)).await; // Optional delay between requests
+                sleep(tokio::time::Duration::from_millis(50)).await; // Optional delay between requests
             }
 
             let params = vec!["catalog"];
@@ -148,12 +150,15 @@ async fn main() {
             let params = vec!["catalog"];
             let result = client.send_data_with_params(Vec::new(), "ReadCollection", params).await.unwrap();
             println!("Directory of Service Received:\n{}", String::from_utf8_lossy(&result));
+            let elapsed: Duration = start_time.elapsed();
+
 
             // Optionally gather stats if `report` flag is set
             if report {
                 println!("doing report");
                 client.collect_stats().await;
                 println!("Total failed Tasks: {}", failures);
+                println!("Total Test Time: {}", elapsed.as_secs_f64());
             }
         }
         _ => {

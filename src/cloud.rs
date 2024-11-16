@@ -45,7 +45,7 @@ pub struct CloudNode {
     total_task_time:Arc<Mutex<Duration>>,
 
     // Distributed DB 
-    tables: Arc<Mutex<HashMap<String, Vec<Value>>>>,
+    collections: Arc<Mutex<HashMap<String, Vec<Value>>>>,
     db_data_version: Arc<Mutex<u32>>,
 
     
@@ -85,9 +85,9 @@ impl CloudNode {
         // let internal_socket: SocketAddr = format!("{}:{}", address.ip().to_string(), 4444).parse().unwrap();
         
         // initialize any table names that should exist
-        let mut tables = HashMap::new();
+        let mut collections = HashMap::new();
         for table_name in table_names.unwrap_or_else(Vec::new) {
-            tables.insert(table_name.to_string(), Vec::new());
+            collections.insert(table_name.to_string(), Vec::new());
         }
 
         Ok(Arc::new(CloudNode {
@@ -108,7 +108,7 @@ impl CloudNode {
             total_task_time: Arc::new(Mutex::new(Duration::default())),
 
             // Distributed DB
-            tables: Arc::new(Mutex::new(tables)),
+            collections: Arc::new(Mutex::new(collections)),
             db_data_version: Arc::new(Mutex::new(0)),
         }))
     }
@@ -239,6 +239,7 @@ impl CloudNode {
                     }
                 }
 
+
                 // Distributed DB stuff
                 else if received_msg == "Request: AddCollection" {
                     if let Err(e) = self.db_add_table(addr).await {
@@ -275,7 +276,7 @@ impl CloudNode {
               
 
  // election stuff
-    /// Retrieves updated information from all nodes using TCP messages
+    // Retrieves updated information from all nodes using TCP messages
     async fn get_info(self: &Arc<Self>) {
         let node_addresses: Vec<(String, SocketAddr)> = {
             let nodes = self.nodes.lock().await;
@@ -303,7 +304,6 @@ impl CloudNode {
             match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                 Ok((size, _)) => {
                     let data = &buffer[..size];
-                    // convert data to json
                     // Convert data to JSON
                     let json_obj: Value = match serde_json::from_slice(data) {
                         Ok(json) => json,
@@ -315,6 +315,30 @@ impl CloudNode {
 
                     // let updated load = json_obj['load']
                     let updated_load:i32 = json_obj.get("load").unwrap().as_i64().unwrap() as i32;
+                    // sync DB 
+                    if json_obj.get("db_version").unwrap().as_u64().unwrap() > *self.db_data_version.lock().await as u64 {
+                        // update   self.collections: Arc<Mutex<HashMap<String, Vec<Value>>>>, from json_obj.get("collections") which is created from serializing self.collections.lock().await.clone(),
+                        if let Some(new_collections) = json_obj.get("collections").and_then(|v| v.as_object()) {
+                            let mut collections_lock = self.collections.lock().await;
+                    
+                            // Clear current collections and populate them with the new data
+                            collections_lock.clear();
+                            for (key, value) in new_collections {
+                                if let Some(array) = value.as_array() {
+                                    collections_lock.insert(key.clone(), array.clone());
+                                } else {
+                                    eprintln!("Expected an array for collection '{}', but found {:?}", key, value);
+                                    // Handle the error or skip this collection
+                                }
+                            }
+                        } else {
+                            eprintln!("Failed to update collections: 'collections' field is missing or not an object");
+                            // Handle error appropriately (e.g., skip updating or log error)
+                        }
+                        
+
+                        *self.db_data_version.lock().await = json_obj.get("db_version").unwrap().as_u64().unwrap() as u32;
+                    }
     
                     let mut nodes = self.nodes.lock().await;
                     if let Some(node_info) = nodes.get_mut(&node_id) {
@@ -331,8 +355,6 @@ impl CloudNode {
                 }
             }
         }
-        
-        
     }
 
     /// Handles incoming TCP requests for node information
@@ -348,23 +370,15 @@ impl CloudNode {
             node_info.load = load;
         }
 
-        // let response = format!("{} {}", load, myid);
         let response = to_string(&json!({
             "load": load,
             "id": myid,
-            "collections": self.tables.lock().await.clone()
+            "collections": self.collections.lock().await.clone(),
+            "db_version" : self.db_data_version.lock().await.clone(),
         })).unwrap();
-        // let response = json structure with:
-        // {
-        //     'load' : load,
-        //     'id' : myid,
-        //     'collections' : self.tables
-        // }
-        // where self.tables is a hashmap of strings to a list of json Value objects
         let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
 
         // Send the response back to the requesting node
-        // socket.send_to(response.as_bytes(), addr).await?;
         send_with_retry(&socket, response.as_bytes(), addr, 5).await?;
         println!("Sent info response to {}: {}", addr, response);
 
@@ -411,16 +425,11 @@ impl CloudNode {
         println!("{} {}","elected node:".yellow(), elected_node);
         return elected;        
     }
-  
  // end election stuff
 
 
     /// Handle an incoming connection, aggregate the data, process it, and send a response
     async fn handle_encryption(self: &Arc<Self>, addr: SocketAddr) -> Result<()> {
-        // Convert incoming bytes to a string to parse JSON
-        // let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&data[..size]);
-
-        // if received_msg == "Request: Encrypt" {
         println!("Processing request from client: {}", addr);
 
         // Establish a connection to the client for sending responses
@@ -435,34 +444,27 @@ impl CloudNode {
 
         // Process the aggregated data
         let processed_data = self.process_img(aggregated_data).await;
-
         send_reliable(&socket, &processed_data, addr).await?;
 
-        socket.send_to(END_OF_TRANSMISSION.as_bytes(), &addr).await?;
-        println!("Task for client done: {}", addr);
         *self.completed.lock().await += 1;
-        // }
         println!("Done handling Encrypt for: {}", addr);
         Ok(())
     }
 
     /// Handle an incoming connection, aggregate the data, process it, and send a response
     async fn handle_stats(self: &Arc<Self>, addr: SocketAddr) -> Result<()> {
-        // Convert incoming bytes to a string to parse JSON
-        // let received_msg: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&data[..size]);
-
-        // if received_msg == "Request: Stats" {
         println!("Processing stats request from client: {}", addr);
 
         // Establish a connection to the client for sending responses
         let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
     
         // Lock and retrieve values from the shared stats variables
-        let accepted = *self.accepted.lock().await;
-        let completed = *self.completed.lock().await;
-        let failed_times = *self.failed_number_of_times.lock().await;
+        let requests = self.requests.lock().await.clone();
+        let accepted = self.accepted.lock().await.clone();
+        let completed = self.completed.lock().await.clone();
+        let failed_times = self.failed_number_of_times.lock().await.clone();
         // let failures = *self.failures.lock().await;
-        let total_time = *self.total_task_time.lock().await;
+        let total_time = self.total_task_time.lock().await.clone();
     
         // Calculate the average task completion time if there are any completed tasks
         let avg_completion_time = if completed > 0 {
@@ -474,23 +476,28 @@ impl CloudNode {
         // Create a human-readable stats report
         let stats_report = format!(
             "Server Stats:\n\
+            Requests Recieved: {}\n\
             Accepted Requests: {}\n\
             Completed Tasks: {}\n\
             Failed Attempts: {}\n\
             Total Task Time: {:.2?}\n\
-            Avg Completion Time: {:.2?}\n",
+            Avg Completion Time: {:.2?}\n
+            DB Data: {}\n",
+            requests,
             accepted,
             completed,
             failed_times,
             // failures,
             total_time,
             avg_completion_time,
+            to_string(&json!({
+                "collections": self.collections.lock().await.clone(),
+                "db_version" : self.db_data_version.lock().await.clone(),
+            })).unwrap()
         );
     
         // Send the stats report back to the client
-        // socket.send_to(stats_report.as_bytes(), &addr).await?;
         send_with_retry(&socket, stats_report.as_bytes(), addr, 5).await?;
-        // }
         println!("done handling connection for: {}", addr);
         Ok(())
     }
@@ -537,14 +544,14 @@ impl CloudNode {
                     // Successfully received data from the correct client
                     let table_name: &str = &String::from_utf8_lossy(&packet);
 
-                    let mut tables = self.tables.lock().await;
-                    if tables.contains_key(table_name) {
+                    let mut collections = self.collections.lock().await;
+                    if collections.contains_key(table_name) {
                         // reply to sender
                         let response = format!("Table '{}' already exists.", table_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
                         return Ok(Some(response));
                     } else {
-                        tables.insert(table_name.to_string(), Vec::new());
+                        collections.insert(table_name.to_string(), Vec::new());
                         // update data version with any change in DB
                         *self.db_data_version.lock().await += 1;
                         // reply to sender
@@ -608,8 +615,8 @@ impl CloudNode {
                     //     obj.insert("provider".to_string(), Value::String(addr.ip().to_string()));
                     // }
 
-                    let mut tables = self.tables.lock().await;
-                    if let Some(table) = tables.get_mut(table_name) {
+                    let mut collections = self.collections.lock().await;
+                    if let Some(table) = collections.get_mut(table_name) {
                         table.push(entry);
                         // update data version with any change in DB
                         *self.db_data_version.lock().await += 1;
@@ -687,8 +694,8 @@ impl CloudNode {
                         }
                     };
                     
-                    let mut tables = self.tables.lock().await;
-                    if let Some(table) = tables.get_mut(table_name) {
+                    let mut collections = self.collections.lock().await;
+                    if let Some(table) = collections.get_mut(table_name) {
                         // entry represents dict on fields to match on 
                         // example: { "provider" : "abc" }
 
@@ -742,9 +749,9 @@ impl CloudNode {
         let table_name = &extract_variable(&received_msg)?;
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
 
-        // Access the tables and attempt to fetch the requested table
-        let tables = self.tables.lock().await;
-        if let Some(table) = tables.get(table_name) {
+        // Access the collections and attempt to fetch the requested table
+        let collections = self.collections.lock().await;
+        if let Some(table) = collections.get(table_name) {
             // Convert the Vec<Value> to a JSON array and return it
             // reply to sender
             let response = Value::Array(table.clone()).to_string();
