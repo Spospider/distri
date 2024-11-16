@@ -57,7 +57,6 @@ impl CloudNode {
         address: SocketAddr,
         nodes: Option<HashMap<String, SocketAddr>>,
         chunk_size: usize,
-        elected: bool,
         table_names: Option<Vec<&str>>,
     ) -> Result<Arc<Self>> {
         // let initial_nodes = nodes.unwrap_or_else(HashMap::new);
@@ -94,7 +93,7 @@ impl CloudNode {
             nodes: Arc::new(Mutex::new(initial_nodes)),
             public_socket: Arc::new(socket),
             chunk_size:Arc::new(chunk_size),
-            elected: Arc::new(Mutex::new(elected)),
+            elected: Arc::new(Mutex::new(true)),
             failed: Arc::new(Mutex::new(failed)),
             load: Arc::new(Mutex::new(0)),
             id: Arc::new(Mutex::new(address.port())),
@@ -192,7 +191,7 @@ impl CloudNode {
             }
             println!("looping5");
             // Stats msgs and updateInfo msgs pass directly
-            if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || (*self.elected.lock().await) { // only if elected, or its a stats request
+            if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || *self.elected.lock().await { // only if elected, or its a stats request
                 let node = self.clone();
                 if received_msg == "Request: Encrypt"  {
                         println!("looping6");
@@ -221,11 +220,8 @@ impl CloudNode {
                         // let start_time = Instant::now(); // Record start time
                         if let Err(e) = node.handle_stats(addr).await {
                             eprintln!("Error handling Stats: {:?}", e);
-                            // *node.failures.lock().await += 1; 
                         }
                         else{
-                            // let elapsed: Duration = start_time.elapsed();
-                            // *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
                             println!("Stats Done for {}", addr);
                         }
 
@@ -388,13 +384,19 @@ impl CloudNode {
     /// Elects the leader node based on the lowest load value, breaking ties with the lowest id
      
     async fn elect_leader(self: &Arc<Self>) {
-        // let cloelect_leaderne = self.clone();
         println!("{}", "elect_leader1".yellow());
         let mut elected = self.elected.lock().await;
+
+        // elected = true if there are no known neighbors
+        if self.nodes.lock().await.is_empty() {
+            *elected = true;
+            println!("{} {}","No neighbors, elected:".yellow(), elected);
+        }
         
-        // *elected = false; // Reset election state initially
         println!("{}", "elect_leader2".yellow());
-        self.get_info().await; // Retrieve updated info from all nodes
+        if *self.requests.lock().await > 1 {
+            self.get_info().await; // Retrieve updated info from all nodes
+        }
         println!("{}", "elect_leader3".yellow());
         
         *elected = self.election_alg().await; // Elect a leader based on load and id values

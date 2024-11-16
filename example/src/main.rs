@@ -48,7 +48,6 @@ async fn main() {
         "server" => {
             // Server Mode
             let identifier = args.identifier.unwrap_or(10);
-            let is_elected = identifier == 10; // Use "10" as a unique identifier for an elected server
 
             // Initialize server and other nodes in the network
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
@@ -60,7 +59,7 @@ async fn main() {
             let table_names = Some(vec!["catalog"]);
 
             // Create and start the server
-            let server = CloudNode::new(own_addr, Some(node_map), 1024, is_elected, table_names).await.unwrap();
+            let server = CloudNode::new(own_addr, Some(node_map), 1024, table_names).await.unwrap();
             let server_arc = Arc::new(server);
             tokio::spawn(async move {
                 server_arc.serve().await.unwrap();
@@ -101,10 +100,11 @@ async fn main() {
                 file.read_to_end(&mut data).await.unwrap();
 
                 let result = client.send_data(data, "Encrypt").await;
-                println!("Sent image: {}", file_path);
+                
                 match result {
                     Ok(data) => {
                         // Step 2: Write to file
+                        println!("Sent image: {}", file_path);
                         if let Err(e) = write_to_file("files/received_with_hidden.png", &data).await {
                             eprintln!("Writing received file failed: {}", e);
                         }
