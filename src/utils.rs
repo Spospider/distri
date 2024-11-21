@@ -205,6 +205,7 @@ pub async fn send_reliable(
     let mut packet = Vec::with_capacity(8+FINAL_MSG.len());
     packet.extend_from_slice(&sequence_number.to_be_bytes());
     packet.extend_from_slice(FINAL_MSG.as_bytes());
+    // println!("Sent Final Msg, {:?}", packet);
 
     send_with_retry(socket, &packet, addr, MAX_RETRIES).await?;
 
@@ -216,17 +217,20 @@ pub async fn recv_reliable(socket: &UdpSocket, duration:Option<Duration>) -> Res
     // TODO add expected sender behaviour here
     let mut received_data: HashMap<u64, Vec<u8>> = HashMap::new(); // Store received chunks by sequence number
     let mut expected_sequence_number = 0u64;
-    let mut buffer = vec![0u8; CHUNK_SIZE + 8]; // Buffer to receive chunk + sequence number
     let mut address:SocketAddr;
     println!("Start recv chunks");
 
     loop {
+        let mut buffer = vec![0u8; CHUNK_SIZE + 8]; // Buffer to receive chunk + sequence number
         // Receive a chunk
         let (size, addr) = recv_with_timeout(&socket, &mut buffer, duration.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT))).await?;
+        // if address != addr {
+        //     continue;
+        // }
         address = addr.clone();
         
         // Check if the chunk contains at least the sequence number (8 bytes)
-        if size < 8 {
+        if size <= 8 {
             eprintln!("Received packet too small to contain a sequence number");
             continue; // Ignore incomplete packet
         }
@@ -237,8 +241,8 @@ pub async fn recv_reliable(socket: &UdpSocket, duration:Option<Duration>) -> Res
 
         // Acknowledge receipt of this sequence number
         let ack = received_sequence_number.to_be_bytes();
+        // println!("ACKed {:?} to {}", received_sequence_number, addr);
         socket.send_to(&ack, addr).await?;
-        // println!("ACK Sent");
 
         // If this chunk is what we expected, store it and update the expected sequence number
         if received_sequence_number == expected_sequence_number {
@@ -246,6 +250,9 @@ pub async fn recv_reliable(socket: &UdpSocket, duration:Option<Duration>) -> Res
             // println!("recv {} == expected {}", received_sequence_number, expected_sequence_number);
 
             // Check if this is the last chunk (indicated by empty data)
+            // if chunk.len() < 20 {
+            //     println!("Chunk received {:?}", chunk);
+            // }
             if chunk == FINAL_MSG.as_bytes() {
                 break;
             }

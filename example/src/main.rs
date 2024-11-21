@@ -4,6 +4,7 @@ use distri::cloud::CloudNode;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use std::collections::HashSet;
@@ -105,12 +106,14 @@ async fn main() {
                     Ok(data) => {
                         // Step 2: Write to file
                         println!("Sent image: {}", file_path);
-                        if let Err(e) = write_to_file("files/received_with_hidden.png", &data).await {
-                            eprintln!("Writing received file failed: {}", e);
-                        }
-                        // Step 3: Decrypt Image
-                        if let Err(e) = decrypt_image("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await {
-                            eprintln!("Error decrypting hidden image from {} to {}: {}", "files/received_with_hidden.png", "files/extracted_hidden_image.jpg", e);
+                        if !Path::new("files/received_with_hidden.png").exists() {
+                            if let Err(e) = write_to_file("files/received_with_hidden.png", &data).await {
+                                eprintln!("Writing received file failed: {}", e);
+                            }
+                            // Step 3: Decrypt Image
+                            if let Err(e) = decrypt_image("files/received_with_hidden.png", "files/extracted_hidden_image.jpg").await {
+                                eprintln!("Error decrypting hidden image from {} to {}: {}", "files/received_with_hidden.png", "files/extracted_hidden_image.jpg", e);
+                            }
                         }
                     }
                     Err(e) => {
@@ -143,13 +146,13 @@ async fn main() {
             println!("pushing to DB...");
 
             let result = client.send_data_with_params(client_catalogue_bytes, "AddDocument", params).await.unwrap();
-            println!("{}", String::from_utf8_lossy(&result));
+            println!("Add Doc Result: {}", String::from_utf8_lossy(&result));
 
             println!("Reading directory of service...");
             // Read directory of service
             let params = vec!["catalog"];
             let result = client.send_data_with_params(Vec::new(), "ReadCollection", params).await.unwrap();
-            println!("Directory of Service Received:\n{}", String::from_utf8_lossy(&result));
+            println!("Directory of Service Result:\n{}", String::from_utf8_lossy(&result));
             let elapsed: Duration = start_time.elapsed();
 
 

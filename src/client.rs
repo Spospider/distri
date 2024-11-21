@@ -106,7 +106,7 @@ impl Client {
         // Multicast the message to all nodes
         for node_addr in self.nodes.values() {
             let node_addr = node_addr.clone(); // Clone the address
-            println!("Sending request to {}", node_addr);
+            // println!("Sending request to {}", node_addr);
     
             // Send the request message with retries
             match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
@@ -126,24 +126,21 @@ impl Client {
         let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
     
         let response = String::from_utf8_lossy(&buffer[..size]);
-        if !data.is_empty(){
-            // if there is data to send, expect Ok message first
-            if response == "OK" {
-                println!("Request for service accepted from {}", addr);
-            
+        
+        // if there is data to send, expect Ok message first
+        if response == "OK" {
+            println!("Request for service accepted from {}", addr);
+        
+            if !data.is_empty(){
                 // Send the file data reliably
                 send_reliable(&socket, &data, addr).await?;
-        
-                // Start receiving the result
-                let result = self.await_result(socket, addr).await;
-                return Ok(result?);
             }
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "Send request not accepted."))
-        } else {
-            // return response directy
-            return Ok(buffer[..size].to_vec());
-        }
     
+            // Start receiving the result
+            let result = self.await_result(socket, addr).await;
+            return Ok(result?);
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Send request not accepted."))    
     }
 
 
@@ -199,15 +196,14 @@ impl Client {
 
 
     async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) -> Result<Vec<u8>, std::io::Error>  {
+        println!("recieving on {:?}", socket.local_addr());
         let (data, _, addr) = recv_reliable(&socket, None).await.unwrap(); // Adjust for proper error handling if necessary.
-    
         if addr != sender {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "Received data from unexpected sender",
             ));
         }
-
         Ok(data)
     }
     
