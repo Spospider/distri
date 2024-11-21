@@ -1,6 +1,51 @@
 # Distri
 A Rust framework designed for distributed computing, focusing on both distributed cloud (client-service architecture) and peer-to-peer networking (to be implemented). The framework aims to provide a robust, high-performance, and fault-tolerant solution for building distributed applications with ease.
 
+
+## Service Components
+
+### Cloud
+#### Available Services:
+**Internal Services: (should only be used by the CloudNodes among themselves)**
+- "Request: UpdateInfo"
+    Used to Sync data between server nodes. Data exchanged include node id, load, DB Collections, and DB data version.
+
+**Public Services:**
+- "Request: Stats"
+    Used to fetch stats data from a server, no election is applied with this request, a server will always respond. No (OK) handshaking mechanism here.
+- "Request: Encrypt"
+    Used to encrypt an image and send the result back.
+
+**Distributed DB Services:**
+- "Request: CreateCollection"
+    Used to add a new Collection to the DB, given data of the Collection name as string.
+- "Request: AddDocument<collection_name>"
+    Used to add a new document to a collection in the DB, given the parameter collection_name.
+- "Request: DeleteDocument<collection_name>"
+    Delete document from a collection in the DB, given the parameter collection_name, given data of a JSON-String of attributes and values to exact-match on.
+    *TODO: range params*
+- "Request: ReadCollection"
+    Returns the complete list of docs for a collection
+    *TODO Pagination*
+
+*TODO DeleteCollection*
+
+### Client
+#### Methods
+- **send_data**(**data**:Vec<u8>, **service_name**:str)
+    Requests service and returns the recieved data.
+- **send_data_with_params**(**data**:Vec<u8>, **service_name**:str, **params**: Vec<&str>)
+    Requests service with params, returns the recieved data.
+- **collect_stats**()
+    Performs stats request to all servers and prints each response.
+
+### Peer (TODO)
+
+
+### Usage Philosophy
+All extra logic should be impemented in the main program , the serves should just server, aclients should just be used for communication at the byte level, any processing, decryption etc. should be outside of the client and in the main
+
+
 ### TODO
 Phase 1: **DONE**
 - CMD args for ip tables
@@ -11,7 +56,7 @@ Phase 2: **(CURRENT)**
 - In cloudnode, make file naming unique per socket, add hash prefix to filenames.
 - Figure out why Stegnography decryption sometimes fails, maybe add retry feature, or handle the error and count it in failures.
 - Add new services to CloudNode for the Directory of service. (Adding data + reading data, in different tables defined by the cloudnode init, JSON formatted) **Ali   (DONE)**
-- Figure out syncing the nodes tables (for election conherency, in case a new node joins in & for the Distributed Database) **Ali**
+- Figure out syncing the nodes tables (for election conherency, in case a new node joins in & for the Distributed Database) **Ali (DONE)** 
 - Adding the permissions to encrypted image data. **Fekry**
 - Peer-to-Peer System:
 **Fekry**
@@ -54,6 +99,7 @@ Build the project using Cargo:
 ```
 cargo build
 ```
+
 
 ## Future Work
 

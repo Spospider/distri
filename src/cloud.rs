@@ -186,7 +186,7 @@ impl CloudNode {
                 // count new request for service
                 *self.requests.lock().await += 1;
             }
-            if received_msg.starts_with("Request: AddCollection") || received_msg.starts_with("Request: AddDocument") || received_msg.starts_with("Request: DeleteDocument") || received_msg.starts_with("Request: ReadCollection") {
+            if received_msg.starts_with("Request: CreateCollection") || received_msg.starts_with("Request: AddDocument") || received_msg.starts_with("Request: DeleteDocument") || received_msg.starts_with("Request: ReadCollection") {
             // election slows things down a lot
 
                 let node = self.clone();
@@ -242,7 +242,7 @@ impl CloudNode {
 
 
                 // Distributed DB stuff
-                else if received_msg == "Request: AddCollection" {
+                else if received_msg == "Request: CreateCollection" {
                     if let Err(e) = self.db_add_table(addr).await {
                         eprintln!("Error handling add table service: {:?}", e);
                     } else {
