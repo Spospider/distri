@@ -180,12 +180,13 @@ impl CloudNode {
             let packet = buffer[..size].to_vec();
             let received_msg: String = String::from_utf8_lossy(&packet).into_owned();
 
-            // perform election
-            // Avoid infinite electing
+            // Avoid infinite electing, only elect for public services
             if received_msg != "Request: Stats"  && received_msg != "Request: UpdateInfo" {
                 // count new request for service
                 *self.requests.lock().await += 1;
             }
+
+            // If its a DB operation, sync data with other nodes.
             if received_msg.starts_with("Request: CreateCollection") || received_msg.starts_with("Request: AddDocument") || received_msg.starts_with("Request: DeleteDocument") || received_msg.starts_with("Request: ReadCollection") {
             // election slows things down a lot
 

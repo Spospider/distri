@@ -4,33 +4,49 @@ A Rust framework designed for distributed computing, focusing on both distribute
 
 ## Service Components
 
-### Cloud
+### CloudNode
+The CloudNode is essentially a worker participating int he cloud. It has a main thread, in-which it receives all incoming requests, then handles most* requests is their own separate threads, providing high availability.
+
+CloudNodes also hold their own NoSQL in-memory DB. its not designed for holding large amounts of data, as this data syncs with all nodes after each data-altering DB operation.
+
+\* Read-write operations on the DB are syncronous in the main thread to guarantee data consistency.
+
 #### Available Services:
 **Internal Services: (should only be used by the CloudNodes among themselves)**
-- "Request: UpdateInfo"
+- "**Request: UpdateInfo**"
     Used to Sync data between server nodes. Data exchanged include node id, load, DB Collections, and DB data version.
 
 **Public Services:**
-- "Request: Stats"
+- "**Request: Stats**"
     Used to fetch stats data from a server, no election is applied with this request, a server will always respond. No (OK) handshaking mechanism here.
-- "Request: Encrypt"
+- "**Request: Encrypt**"
     Used to encrypt an image and send the result back.
 
-**Distributed DB Services:**
-- "Request: CreateCollection"
-    Used to add a new Collection to the DB, given data of the Collection name as string.
-- "Request: AddDocument<collection_name>"
-    Used to add a new document to a collection in the DB, given the parameter collection_name.
-- "Request: DeleteDocument<collection_name>"
-    Delete document from a collection in the DB, given the parameter collection_name, given data of a JSON-String of attributes and values to exact-match on.
-    *TODO: range params*
-- "Request: ReadCollection"
-    Returns the complete list of docs for a collection
-    *TODO Pagination*
+> ***TODO** sender whitelisting, internal services should only be available to CloudNodes*
+> ***TODO** Implement protocol for new CloudNodes joining the Distributed cloud.*
+> - Key-pair used to authenticate genuine CloudNodes for security.
+> - Implement node table, DB, and available services data exchange.
+> (Should new (assumed genuine) nodes introduce new data to the cloud? What usecases can this be usedful?)
 
-*TODO DeleteCollection*
+
+**Distributed DB Services:**
+- "**Request: CreateCollection**"
+    Used to add a new Collection to the DB, given data of the Collection name as string.
+- "**Request: AddDocument<*collection_name*>**"
+    Used to add a new document to a collection in the DB, given the parameter collection_name.
+- "**Request: DeleteDocument<*collection_name*>**"
+    Delete document from a collection in the DB, given the parameter collection_name, given data of a JSON-String of attributes and values to exact-match on.
+    > ***TODO**: range params*
+- "**Request: ReadCollection**"
+    Returns the complete list of docs for a collection
+    > ***TODO** Pagination*
+
+> ***TODO** DeleteCollection*
 
 ### Client
+The Client acts as the communication module to the distriibuted service. Data going in and out of the client is going to be in the format of bytes.
+
+
 #### Methods
 - **send_data**(**data**:Vec<u8>, **service_name**:str)
     Requests service and returns the recieved data.
@@ -40,7 +56,7 @@ A Rust framework designed for distributed computing, focusing on both distribute
     Performs stats request to all servers and prints each response.
 
 ### Peer (TODO)
-
+\*The peer class should utilise the client for communication with the cloud. The main purpose of the peer is to communicate with other peers.
 
 ### Usage Philosophy
 All extra logic should be impemented in the main program , the serves should just server, aclients should just be used for communication at the byte level, any processing, decryption etc. should be outside of the client and in the main
@@ -75,6 +91,7 @@ distri/
 ├── src/             # Main source directory for library modules
 │   ├── client.rs    # Client class implementation
 │   ├── cloud.rs     # CloudNode implementation
+│   ├── peer.rs      # Peer class implementation
 │   ├── utils.rs     # Shared utility functions
 │   └── lib.rs       # Library's main access point (entry point for public API)
 ```
