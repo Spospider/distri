@@ -93,6 +93,7 @@ Phase 2: **(CURRENT)**
         - Allow changing of permissions of published images through the interface.
         - Popups for accepting incoming image access request from peers, owner can approve it directly, or modify the number of access rights.
         - interface should not wait for anything, **its always interactive everything else in separate threads**, maybe show the waitlist for on-going requests. 
+    - Adding the peer option to the Example file, to create a peer and start the interface, all interface logic will be in the example program, **peer is a middleware**.
 
 **Defining image permissions**: number of image views, how many times the image can be viewed.
 
@@ -111,11 +112,6 @@ distri/
 │   └── lib.rs       # Library's main access point (entry point for public API)
 ```
 
-### Testing (Dev)
-Test through running the example project in /examples:
-```
-RUST_BACKTRACE=1 cargo run
-```
 
 ## Installation
 
@@ -123,14 +119,42 @@ To get started with this framework, ensure you have Rust installed. If you don't
 
 Clone the repository:
 
-```bash
-git clone https://github.com/yourusername/distributed-computing-framework.git
-cd distributed-computing-framework
-```
-Build the project using Cargo:
+Build the library using Cargo:
 ```
 cargo build
 ```
+To use the Example program
+```
+cd example
+cargo build
+```
+
+
+
+### Running the Example Project
+Test through running the example project in /examples:
+
+#### Args:
+`--mode [client | server]`
+`--report` (flag for the client only, to produce a stats report at the end of the test)
+`--ips [comma separated list of server addresses]` (for servers, the first address will be considered as the address of the new worker, make sure to place the first address in the list accordingly)
+
+
+#### Creating a client:
+```
+cargo run -- --mode client --report --ips 127.0.0.1:3000,127.0.0.1:3001
+```
+
+#### Creating a Server: (Assuming 2 servers here)
+Server 1:
+```
+cargo run -- --mode server --ips 127.0.0.1:3000,127.0.0.1:3001
+```
+Server 2:
+```
+cargo run -- --mode server --ips 127.0.0.1:3001,127.0.0.1:3000
+```
+
 
 
 ## Future Work
