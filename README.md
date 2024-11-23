@@ -76,10 +76,25 @@ Phase 2: **(CURRENT)**
 - Adding the permissions to encrypted image data. **Fekry**
 - Peer-to-Peer System:
 **Fekry**
+    - Publishing to Directory of service on startup and periodically through resources being in a particular folder (this will be in example) (contents in folder are auto-published resources)
+    - 
     - Fetching from directory of service & displaying the list of images, and their owners.
-    - Implement requesting and receiving data from peer.
-    - Implementing decryption & image viewing at the client.
+    - Implement adding a metadata block to images sent by peers, and reading them correctly (be able to separate image date from metadata).
+    - Implement requesting and receiving data from peer, storing them encrypted as they are in a separate folder called "borrowed". requests re through unique ids composed of peer IP+port + img_name
+    - Implementing in-memory decryption & image viewing in the example application with permission checks.
+    - periodic checking of the directory of service + on startup, and invalidating any images accordingly (deleting them from borrowed).
+    - Peers keep track of who has access to what for how long, and this is published on the directory of service as well.
+    - Implement a waitlist functionality for requests to image owners that are unreachable, periodical requests to that peer until they are reached, then these requests are popped from that waitlist.
+    - **Interface**:
+        - Listing available resources from the DOS.
+        - Selecting one or multiple images to request access to from peer.
+        - List peer's own images and images they have access to as sort of 2 sections. (Main menu)
+        - Image viewer: being able to view the images (decrypted in-mem).
+        - Allow changing of permissions of published images through the interface.
+        - Popups for accepting incoming image access request from peers, owner can approve it directly, or modify the number of access rights.
+        - interface should not wait for anything, **its always interactive everything else in separate threads**, maybe show the waitlist for on-going requests. 
 
+**Defining image permissions**: number of image views, how many times the image can be viewed.
 
 
 
