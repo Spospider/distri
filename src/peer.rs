@@ -160,6 +160,42 @@ impl Peer {
         }
     }
     
+    pub async fn send_collection_to_server(
+        socket: &UdpSocket,
+        server_addr: SocketAddr,
+        collection_name: &str,
+        collection_data: &HashMap<String, Value>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Serialize the collection data to JSON
+        let json_data = serde_json::to_string(collection_data)?;
+        println!("Serialized collection '{}': {}", collection_name, json_data);
+    
+        // Create the request message
+        let message = format!("SendCollection:{}:{}", collection_name, json_data);
+    
+        // Send the collection with retry logic
+        send_with_retry(socket, message.as_bytes(), server_addr, MAX_RETRIES).await?;
+        println!("Collection '{}' sent to server at {}", collection_name, server_addr);
+    
+        // Wait for acknowledgment
+        match recv_reliable(socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
+            Ok((ack_data, _, _)) => {
+                let ack_message = String::from_utf8_lossy(&ack_data);
+                if ack_message != "OK" {
+                    return Err(format!("Server returned error: {}", ack_message).into());
+                }
+                println!("Server acknowledged collection '{}'", collection_name);
+            }
+            Err(e) => {
+                eprintln!("Failed to receive acknowledgment: {}", e);
+                return Err(Box::new(e));
+            }
+        }
+    
+        Ok(())
+    }
+
+
     // /// Request image encryption
     // pub async fn request_image_encryption(
     //     self: &Arc<Self>,
