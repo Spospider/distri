@@ -4,6 +4,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Error, ErrorKind};
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -48,7 +49,6 @@ pub struct CloudNode {
     // Distributed DB 
     collections: Arc<Mutex<HashMap<String, Vec<Value>>>>,
     db_data_version: Arc<Mutex<u32>>,
-
     
 }
 
@@ -76,15 +76,10 @@ impl CloudNode {
                     }
                 )
             })
-            .collect();
-        // initialize initial_nodes as Arc<Mutex<HashMap<String, NodeInfo>>> from  nodes: Option<HashMap<String, SocketAddr>> 
-        
+            .collect();        
         let socket = UdpSocket::bind(address).await?;
         let failed = false;
-      
-        // (address: SocketAddr)use address ip only as str here
-        // let internal_socket: SocketAddr = format!("{}:{}", address.ip().to_string(), 4444).parse().unwrap();
-        
+              
         // initialize any table names that should exist
         let mut collections = HashMap::new();
         for table_name in table_names.unwrap_or_else(Vec::new) {
@@ -118,167 +113,201 @@ impl CloudNode {
     pub async fn serve(self: &Arc<Self>) -> Result<()> {
         println!("Listening for incoming info requests on {:?}", self.public_socket.local_addr());
 
+        // initialize request queue, multi-sender, multi receiver.
+        // let (tx, mut rx) = mpsc::channel(1000);
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
 
-        let mut buffer = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
-        loop {
-            println!("looping0");
-            // let (size, addr) = self.public_socket.recv_from(&mut buffer).await?;
-            let (size, addr) = match recv_with_timeout(&self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
-                Ok((size, addr)) => (size, addr), // Successfully received data
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    continue;
-                    // eprintln!("Receive operation timed out");
-                    // continue; // Early exit or perform specific logic on timeout
-                },
-                Err(e) => {
-                    eprintln!("Failed to receive data: {:?}", e);
-                    continue; // Early exit or handle the error in some other way
+        // main receiving layer thread
+        let recv_self = self.clone();
+        let recv_queue = queue.clone();
+        tokio::spawn(async move {
+            loop {
+                println!("looping1");
+                let mut buffer: Vec<u8> = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
+                let (size, addr) = match recv_with_timeout(&recv_self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
+                    Ok((size, addr)) => (size, addr), // Successfully received data
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                        continue; // Early exit or handle the error in some other way
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to receive data: {:?}", e);
+                        continue; // Early exit or handle the error in some other way
+                    }
+                };
+
+                // Failure mechanism
+                let random_value = rand::thread_rng().gen_range(1..=10);
+                println!("looping2");
+                // If the random value is 0, do something
+                if random_value == 0 && !*recv_self.failed.lock().await  {  // start failure election
+                    println!("looping2.1");
+                    let mut failed = recv_self.failed.lock().await;
+                    *failed = false; // Reset election state initially
+                    println!("looping2.11");
+                    let _ = recv_self.get_info(); // Retrieve updated info from all nodes
+                    println!("looping2.12");
+                    *failed = recv_self.election_alg(None).await; // Elect a node to fail
+                    println!("looping2.13");
+                    if *failed {
+                        *recv_self.failed_number_of_times.lock().await += 1;
+                        println!("Node {} with is now failed.", recv_self.public_socket.local_addr().unwrap());
+                    }
+                    println!("looping2.2");
                 }
-            };
-            println!("looping1");
-            
-
-            let random_value = rand::thread_rng().gen_range(1..=10);
-            println!("looping2");
-            // If the random value is 0, do something
-            if random_value == 0 && !*self.failed.lock().await  {  // start failure election
-                println!("looping2.1");
-                let mut failed = self.failed.lock().await;
-                *failed = false; // Reset election state initially
-                println!("looping2.11");
-                let _ = self.get_info(); // Retrieve updated info from all nodes
-                println!("looping2.12");
-                *failed = self.election_alg(None).await; // Elect a node to fail
-                println!("looping2.13");
-                if *failed {
-                    *self.failed_number_of_times.lock().await += 1;
-                    println!("Node {} with is now failed.", self.public_socket.local_addr()?);
+                println!("looping3");
+                
+                // while failed do nothing at all
+                if *recv_self.failed.lock().await {
+                    println!("looping3.1");
+                    let random_value = rand::thread_rng().gen_range(0..=10);
+                    if random_value == 0 {
+                        println!("looping3.2");
+                        println!("Node {} is back up from failure.", recv_self.public_socket.local_addr().unwrap());
+                        let mut failed = recv_self.failed.lock().await;
+                        *failed = false;
+                        println!("looping3.3");
+                    }
+                    else {
+                        // stay failed
+                        println!("Node is dead");
+                        continue;
+                    }
                 }
-                println!("looping2.2");
-            }
-            println!("looping3");
-            
-            // while failed do nothing at all
-            if *self.failed.lock().await {
-                println!("looping3.1");
-                let random_value = rand::thread_rng().gen_range(0..=10);
-                if random_value == 0 {
-                    println!("looping3.2");
-                    println!("Node {} is back up from failure.", self.public_socket.local_addr()?);
-                    let mut failed = self.failed.lock().await;
-                    *failed = false;
-                    println!("looping3.3");
-                }
-                else {
-                    // stay failed
-                    println!("Node is dead");
-                    continue;
-                }
-            }
-            println!("looping4");
-            // Clone buffer data to process it in a separate task
-            let packet = buffer[..size].to_vec();
-            let received_msg: String = String::from_utf8_lossy(&packet).into_owned();
+                println!("looping4");
+                // Clone buffer data to process it in a separate task
+                let packet = buffer[..size].to_vec();
+                let received_msg: String = String::from_utf8_lossy(&packet).into_owned();
 
-            // Avoid infinite electing, only elect for public services
-            if received_msg != "Request: Stats"  && received_msg != "Request: UpdateInfo" {
-                // count new request for service
-                *self.requests.lock().await += 1;
+                // Send to queue
+                recv_queue.lock().await.push_back((received_msg, addr, Instant::now()));
+                // if tx.send((received_msg, addr)).await.is_err() {
+                //     eprintln!("Receiver task: failed to send to processing queue.");
+                // }
+                println!("looping5");
             }
+        });
 
-            // If its a DB operation, sync data with other nodes.
-            if received_msg.starts_with("Request: CreateCollection") || received_msg.starts_with("Request: AddDocument") || received_msg.starts_with("Request: DeleteDocument") || received_msg.starts_with("Request: ReadCollection") {
-            // election slows things down a lot
+        // main receiving layer thread
+        for _ in 0..4 {
+            let proc_self = self.clone();
+            let proc_queue = queue.clone();
 
-                let node = self.clone();
-                tokio::spawn(async move {
-                    node.elect_leader(Some(true)).await;
-                });
-            }
-            println!("looping5");
-            // Stats msgs and updateInfo msgs pass directly
-            if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || *self.elected.lock().await { // only if elected, or its a stats request
-                let node = self.clone();
-                if received_msg == "Request: Encrypt"  {
-                        println!("looping6");
-                        
+            // Processing layer thread
+            tokio::spawn(async move {
+                loop {
+                    // Pop from queue
+                    let (received_msg, addr, recv_time) = match proc_queue.lock().await.pop_back() {
+                        Some((received_msg, addr, recv_time)) => (received_msg, addr, recv_time),
+                        None => {
+                            continue;
+                        },
+                    };
 
-                        // Spawn a task to handle the connection and data processing
-                        println!("looping7");
+                    // Drop old requests, focus on ones the clients are still waiting on
+                    if recv_time.elapsed() > Duration::from_secs(DEFAULT_TIMEOUT) {
+                        continue;
+                    }
+
+                    // Avoid infinite electing, only elect for public services
+                    if received_msg != "Request: Stats"  && received_msg != "Request: UpdateInfo" {
+                        // count new request for service
+                        *proc_self.requests.lock().await += 1;
+                    }
+
+                    // If its a DB operation, sync data with other nodes.
+                    if received_msg.starts_with("Request: CreateCollection") || received_msg.starts_with("Request: AddDocument") || received_msg.starts_with("Request: DeleteDocument") || received_msg.starts_with("Request: ReadCollection") {
+                    // election slows things down a lot
+                        let node = proc_self.clone();
                         tokio::spawn(async move {
-                            let start_time = Instant::now(); // Record start time
-                            if let Err(e) = node.handle_encryption(addr).await {
-                                eprintln!("Error handling Encrypt: {:?}", e);
-                                *node.failures.lock().await += 1; 
-                            }
-                            else{
-                                let elapsed: Duration = start_time.elapsed();
-                                *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
-                                println!("Encrypt Done for {}", addr);
-                            }
-
+                            node.elect_leader(Some(true)).await;
                         });
-                }
-                else if received_msg == "Request: Stats"  {
-                    println!("looping8");
-                    // Spawn a task to handle the connection and data processing
-                    tokio::spawn(async move {
-                        // let start_time = Instant::now(); // Record start time
-                        if let Err(e) = node.handle_stats(addr).await {
-                            eprintln!("Error handling Stats: {:?}", e);
-                        }
-                        else{
-                            println!("Stats Done for {}", addr);
-                        }
+                    }
 
-                    });
-                    
-                }
-                else if received_msg == "Request: UpdateInfo" {
-                    println!("received UpdateInfo");
-                    if let Err(e) = self.handle_info_request(addr).await {
-                        eprintln!("Error handling UpdateInfo: {:?}", e);
-                    }
-                }
+                    // Stats msgs and updateInfo msgs pass directly
+                    if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || *proc_self.elected.lock().await { // only if elected, or its a stats request
+                        println!("Handling something");
+                        let node = proc_self.clone();
+                        if received_msg == "Request: Encrypt"  {
+                                println!("looping6");
 
-
-                // Distributed DB stuff
-                else if received_msg == "Request: CreateCollection" {
-                    if let Err(e) = self.db_add_table(addr).await {
-                        eprintln!("Error handling add table service: {:?}", e);
-                    } else {
-                        println!("AddCollection Done for {}", addr);
-                    }
-                }
-                else if received_msg.starts_with("Request: AddDocument") {  // only check the first part of "Request: AddDocument<tablename>"
-                    if let Err(e) = self.db_add_entry(&received_msg.clone(), addr).await {
-                        eprintln!("Error handling add doc service: {:?}", e);
-                    } else {
-                        println!("AddDocument Done for {}", addr);
-                    }
-                }
-                else if received_msg.starts_with("Request: DeleteDocument") {  // only check the first part of "Request: AddDocument<tablename>"
-                    if let Err(e) = self.db_delete_entry(&received_msg.clone(), addr).await {
-                        eprintln!("Error handling delete doc service: {:?}", e);
-                    } else {
-                        println!("DeleteDocument Done for {}", addr);
-                    }
-                }
-                else if received_msg.starts_with("Request: ReadCollection") { // only check the first part of "Request: ReadCollection<tablename>"
-                    tokio::spawn(async move {
-                        // let start_time = Instant::now(); // Record start time
-                        if let Err(e) = node.db_read_table(&received_msg.clone(), addr).await {
-                            eprintln!("Error handling read table service: {:?}", e);
+                                // Spawn a task to handle the connection and data processing
+                                println!("looping7");
+                                tokio::spawn(async move {
+                                    let start_time = Instant::now(); // Record start time
+                                    if let Err(e) = node.handle_encryption(addr).await {
+                                        eprintln!("Error handling Encrypt: {:?}", e);
+                                        *node.failures.lock().await += 1; 
+                                    }
+                                    else{
+                                        let elapsed: Duration = start_time.elapsed();
+                                        *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
+                                        println!("Encrypt Done for {}", addr);
+                                    }
+                                });
                         }
-                        else{
-                            println!("ReadCollection Done for {}", addr);
+                        else if received_msg == "Request: Stats"  {
+                            println!("looping8");
+                            // Spawn a task to handle the connection and data processing
+                            tokio::spawn(async move {
+                                // let start_time = Instant::now(); // Record start time
+                                if let Err(e) = node.handle_stats(addr).await {
+                                    eprintln!("Error handling Stats: {:?}", e);
+                                }
+                                else{
+                                    println!("Stats Done for {}", addr);
+                                }
+
+                            });
+                            
+                        }
+                        else if received_msg == "Request: UpdateInfo" {
+                            println!("received UpdateInfo");
+                            if let Err(e) = proc_self.handle_info_request(addr).await {
+                                eprintln!("Error handling UpdateInfo: {:?}", e);
+                            }
                         }
 
-                    });
+
+                        // Distributed DB stuff
+                        else if received_msg == "Request: CreateCollection" {
+                            if let Err(e) = proc_self.db_add_table(addr).await {
+                                eprintln!("Error handling add table service: {:?}", e);
+                            } else {
+                                println!("AddCollection Done for {}", addr);
+                            }
+                        }
+                        else if received_msg.starts_with("Request: AddDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                            if let Err(e) = proc_self.db_add_entry(&received_msg.clone(), addr).await {
+                                eprintln!("Error handling add doc service: {:?}", e);
+                            } else {
+                                println!("AddDocument Done for {}", addr);
+                            }
+                        }
+                        else if received_msg.starts_with("Request: DeleteDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                            if let Err(e) = proc_self.db_delete_entry(&received_msg.clone(), addr).await {
+                                eprintln!("Error handling delete doc service: {:?}", e);
+                            } else {
+                                println!("DeleteDocument Done for {}", addr);
+                            }
+                        }
+                        else if received_msg.starts_with("Request: ReadCollection") { // only check the first part of "Request: ReadCollection<tablename>"
+                            tokio::spawn(async move {
+                                // let start_time = Instant::now(); // Record start time
+                                if let Err(e) = node.db_read_table(&received_msg.clone(), addr).await {
+                                    eprintln!("Error handling read table service: {:?}", e);
+                                }
+                                else{
+                                    println!("ReadCollection Done for {}", addr);
+                                }
+
+                            });
+                        }
+                    }
                 }
-            }
+                
+            });
         }
-        // Ok(())
+        Ok(())
     }
               
 
@@ -402,8 +431,9 @@ impl CloudNode {
     /// Elects the leader node based on the lowest load value, breaking ties with the lowest id
      
     async fn elect_leader(self: &Arc<Self>, for_db:Option<bool>) {
-        // println!("{}", "elect_leader1".yellow());
+        println!("{}", "elect_leader1".yellow());
         let mut elected = self.elected.lock().await;
+        println!("elected locked");
 
         // elected = true if there are no known neighbors
         if self.nodes.lock().await.is_empty() {

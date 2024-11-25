@@ -71,20 +71,20 @@ Phase 1: **DONE**
 Phase 2: **(CURRENT)**
 - In cloudnode, make file naming unique per socket, add hash prefix to filenames.
 - Figure out why Stegnography decryption sometimes fails, maybe add retry feature, or handle the error and count it in failures.
-- Add new services to CloudNode for the Directory of service. (Adding data + reading data, in different tables defined by the cloudnode init, JSON formatted) **Ali   (DONE)**
-- Figure out syncing the nodes tables (for election conherency, in case a new node joins in & for the Distributed Database) **Ali (DONE)** 
-- Adding the permissions to encrypted image data. **Fekry**
-- Peer-to-Peer System:
+- **Distributed DB:**
+    - Add new services to CloudNode for the Directory of service. (Adding data + reading data, in different tables defined by the cloudnode init, JSON formatted) **Ali   (DONE)**
+    - Figure out syncing the nodes tables (for election conherency, in case a new node joins in & for the Distributed Database) **Ali (DONE)** 
+- **Peer-to-Peer System:**
 **Fekry**
     - Publishing to Directory of service on startup and periodically through resources being in a particular folder (this will be in example) (contents in folder are auto-published resources)
-    - 
     - Fetching from directory of service & displaying the list of images, and their owners.
-    - Implement adding a metadata block to images sent by peers, and reading them correctly (be able to separate image date from metadata).
+    - Implement adding a metadata block (containing permissions) to images sent by peers, and reading them correctly (be able to separate image date from metadata).
     - Implement requesting and receiving data from peer, storing them encrypted as they are in a separate folder called "borrowed". requests re through unique ids composed of peer IP+port + img_name
     - Implementing in-memory decryption & image viewing in the example application with permission checks.
     - periodic checking of the directory of service + on startup, and invalidating any images accordingly (deleting them from borrowed).
     - Peers keep track of who has access to what for how long, and this is published on the directory of service as well.
     - Implement a waitlist functionality for requests to image owners that are unreachable, periodical requests to that peer until they are reached, then these requests are popped from that waitlist.
+    - The number of views should be tracked, with each published permission,so that when peers shut down or come back the data is synced, a local copy is also stored for consistency. 
     - **Interface**:
         - Listing available resources from the DOS.
         - Selecting one or multiple images to request access to from peer.
