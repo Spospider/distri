@@ -8,19 +8,28 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::time::Duration;
 use crate::utils::{send_reliable, recv_reliable, DEFAULT_TIMEOUT};
+use crate::client::Client;
+
 use std::path::Path;
 use std::fs;
 use base64;
 
 
-/// I think we need peer instead of client.Client to hold the individual peer info
 pub struct Peer {
     pub peer_id: u16,
     pub public_socket: Arc<UdpSocket>,            // Socket for communication
     pub cloud_address: SocketAddr,               // Address of the cloud (central server or leader)
     pub server_addresses: Arc<Mutex<Vec<SocketAddr>>>, // List of known servers
     pub collections: Arc<Mutex<HashMap<String, Vec<Value>>>>, // Local data storage
+    client:Client, //we should use a client object here for as the cloud communication middleware.
 }
+
+// Functions to be implemented in peer:
+// publish_info() : checks contents of resources folder, publishes a document of my own address and the list of resources (filenames) + maybe some file metadata to the cloud.
+// fetch_catalog() : fetches the 'catalog' collection from the cloud, returns the json.
+// request_resource(peer_addr, resource_name, num_views) : request resource from peer for a certain number of views.
+// grant_resource(peer_addr, resource_name, num_views) : grants and sends the resource to the other peer.
+
 
 impl Peer {
     /// Create a new peer instance
