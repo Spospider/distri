@@ -36,6 +36,7 @@ pub struct CloudNode {
     failed: Arc<Mutex<bool>>,
     load: Arc<Mutex<i32>>,
     id: Arc<Mutex<u16>>, // is the port of the addr, server ports have to be unique
+    num_workers: Arc<Mutex<u32>>,
     // internal_socket: Arc<UdpSocket>,
     
     // For stats
@@ -55,6 +56,7 @@ pub struct CloudNode {
 impl CloudNode {
     /// Creates a new CloudNode
     pub async fn new(
+        num_workers:u32,
         address: SocketAddr,
         nodes: Option<HashMap<String, SocketAddr>>,
         chunk_size: usize,
@@ -94,6 +96,7 @@ impl CloudNode {
             failed: Arc::new(Mutex::new(failed)),
             load: Arc::new(Mutex::new(0)),
             id: Arc::new(Mutex::new(address.port())),
+            num_workers: Arc::new(Mutex::new(num_workers)),
           
             // Stats init
             requests: Arc::new(Mutex::new(0)),
@@ -116,6 +119,7 @@ impl CloudNode {
         // initialize request queue, multi-sender, multi receiver.
         // let (tx, mut rx) = mpsc::channel(1000);
         let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let num_workers = self.num_workers.lock().await.clone();
 
         // main receiving layer thread
         let recv_self = self.clone();
@@ -188,7 +192,7 @@ impl CloudNode {
         });
 
         // main receiving layer thread
-        for _ in 0..4 {
+        for _ in 0..num_workers {
             let proc_self = self.clone();
             let proc_queue = queue.clone();
 
@@ -283,6 +287,13 @@ impl CloudNode {
                                 println!("AddDocument Done for {}", addr);
                             }
                         }
+                        else if received_msg.starts_with("Request: UpdateDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                            if let Err(e) = proc_self.db_update_entry(&received_msg.clone(), addr).await {
+                                eprintln!("Error handling update doc service: {:?}", e);
+                            } else {
+                                println!("UpdateDocument Done for {}", addr);
+                            }
+                        }
                         else if received_msg.starts_with("Request: DeleteDocument") {  // only check the first part of "Request: AddDocument<tablename>"
                             if let Err(e) = proc_self.db_delete_entry(&received_msg.clone(), addr).await {
                                 eprintln!("Error handling delete doc service: {:?}", e);
@@ -307,6 +318,9 @@ impl CloudNode {
                 
             });
         }
+        tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install Ctrl+C signal handler");
         Ok(())
     }
               
@@ -702,6 +716,106 @@ impl CloudNode {
                         return Ok(response);
                     } else {
                         // reply to sender
+                        let response = format!("Table '{}' does not exist.", table_name);
+                        send_reliable(&socket, response.as_bytes(), addr).await?;
+                        return Ok(response);
+                    }
+
+                }, // Successfully received data
+                Ok((_, _, recv_addr)) => {
+                    eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                    // Ignore and continue to wait for correct address
+                    (0, 0, recv_addr)
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    eprintln!("Receive operation timed out");
+                    return Err(Error::new(ErrorKind::Other, "Receive operation timed out"));
+                },
+                Err(e) => {
+                    eprintln!("Failed to receive data: {:?}", e);
+                    return Err(Error::new(ErrorKind::Other, "No variable supplied"));
+                }
+            };
+        }
+        return Err(Error::new(ErrorKind::Other, "Client did not communicate"));
+    }
+
+    // Update an entry in a specific table
+    async fn db_update_entry(&self, received_msg: &str, addr: SocketAddr) -> Result<String> {
+        // Process input variable
+        let table_name = &extract_variable(&received_msg)?;
+
+        let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
+        // Send OK response
+        send_with_retry(&socket, b"OK", addr, 5).await?;
+        println!("{:?} Sent 'OK' message for UpdateEntry to {}", socket.local_addr(), addr);
+
+        // Receive data
+        // Loop to ensure we get data from the correct client
+        for _ in 0..5 {
+            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
+                Ok((packet, size, recv_addr)) if recv_addr == addr => {
+                    println!("Done receiving");
+                    let packet = packet[..size].to_vec();
+                    let data: String = String::from_utf8_lossy(&packet).trim().to_string();
+                    
+                    let entry_to_update: Value = match serde_json::from_slice(&packet) {
+                        Ok(value) => value,
+                        Err(e) => {
+                            eprintln!("Failed to parse JSON: {:?}", e);
+
+                            // Reply to sender
+                            let response = format!("Error:Failed to parse JSON: {:?}", e);
+                            send_reliable(&socket, response.as_bytes(), addr).await?;
+                            return Err(Error::new(ErrorKind::Other, "Failed to parse JSON"));
+                        }
+                    };
+
+                    // Extract ID for matching
+                    let id = if let Value::Object(ref obj) = entry_to_update {
+                        if let Some(Value::String(id)) = obj.get("UUID") {
+                            id.clone()
+                        } else {
+                            // Reply to sender
+                            let response = "Error: No valid 'UUID' field found in JSON".to_string();
+                            send_reliable(&socket, response.as_bytes(), addr).await?;
+                            return Err(Error::new(ErrorKind::Other, "No valid 'UUID' field found in JSON"));
+                        }
+                    } else {
+                        // Reply to sender
+                        let response = "Error: JSON must be an object".to_string();
+                        send_reliable(&socket, response.as_bytes(), addr).await?;
+                        return Err(Error::new(ErrorKind::Other, "JSON must be an object"));
+                    };
+
+                    let mut collections = self.collections.lock().await;
+                    if let Some(table) = collections.get_mut(table_name) {
+                        // Find the entry to update
+                        if let Some(existing_entry) = table.iter_mut().find(|doc| {
+                            if let Value::Object(ref obj) = doc {
+                                obj.get("UUID") == Some(&Value::String(id.clone()))
+                            } else {
+                                false
+                            }
+                        }) {
+                            *existing_entry = entry_to_update; // Replace the entry
+                            // Update data version
+                            *self.db_data_version.lock().await += 1;
+                            println!("Updated Doc: {}", data);
+
+                            // Reply to sender
+                            let response = "Document updated successfully".to_string();
+                            println!("Sending Reply to {:?}", addr);
+                            send_reliable(&socket, response.as_bytes(), addr).await?;
+                            return Ok(response);
+                        } else {
+                            // Reply to sender
+                            let response = format!("Error: No document found with id '{}'.", id);
+                            send_reliable(&socket, response.as_bytes(), addr).await?;
+                            return Ok(response);
+                        }
+                    } else {
+                        // Reply to sender
                         let response = format!("Table '{}' does not exist.", table_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
                         return Ok(response);

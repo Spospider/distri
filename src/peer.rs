@@ -63,12 +63,13 @@ impl Peer {
     pub async fn fetch_catalog(
         &self,
         server_addr: SocketAddr,
-        tablename: &str,
     ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
         // Create the request message
+        let tablename = "catalog";
         let request_message = format!("Request: ReadCollection{}", tablename);
     
         // Send the request to the server using `send_with_retry`
+        // TODO use client here, remove server_addr
         send_with_retry(&self.public_socket, request_message.as_bytes(), server_addr, MAX_RETRIES).await?;
         println!("Sent request: {}", request_message);
     
@@ -260,6 +261,7 @@ impl Peer {
         let message = format!("PublishInfo:{}", payload_str);
     
         // Send the payload with retry logic
+        // TODO Use client here, and remove server_addr param, it will take care of sending
         send_with_retry(socket, message.as_bytes(), server_addr, MAX_RETRIES).await?;
         println!("Published info to server at {}", server_addr);
     

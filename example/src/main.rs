@@ -8,8 +8,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use std::collections::HashSet;
-use serde_json::json;
-use serde_json::to_vec;
+use serde_json::{to_vec, Value, json};
+
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
@@ -60,18 +60,9 @@ async fn main() {
             let table_names = Some(vec!["catalog"]);
 
             // Create and start the server
-            let server = CloudNode::new(own_addr, Some(node_map), 1024, table_names).await.unwrap();
+            let server = CloudNode::new(4, own_addr, Some(node_map), 1024, table_names).await.unwrap();
             let server_arc = Arc::new(server);
-            tokio::spawn(async move {
-                server_arc.serve().await.unwrap();
-            });
-
-            println!("Server {} started at {:?}", identifier, own_addr);
-            // Wait for a termination signal (Ctrl+C)
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to install Ctrl+C signal handler");
-            println!("Shutting down server...");
+            server_arc.serve().await.unwrap();
         }
         "client" => {
             // Client Mode
@@ -125,7 +116,7 @@ async fn main() {
             }
 
             let params = vec!["catalog"];
-            let client_catalogue =json!({
+            let mut client_catalogue =json!({
                 "images" : {
                     "img1" : {
                         "size" : "value",
@@ -145,9 +136,17 @@ async fn main() {
 
             println!("pushing to DB...");
 
-            let result = client.send_data_with_params(client_catalogue_bytes, "AddDocument", params).await.unwrap();
+            let result = client.send_data_with_params(client_catalogue_bytes, "AddDocument", params.clone()).await.unwrap();
             println!("Add Doc Result: {}", String::from_utf8_lossy(&result));
+            client_catalogue["UUID"] = Value::String(String::from_utf8_lossy(&result).to_string());
+            client_catalogue["New thing"] = Value::String("some txt".to_string());
 
+            let client_catalogue_bytes = to_vec(&client_catalogue).expect("Failed to serialize JSON");
+
+            let result = client.send_data_with_params(client_catalogue_bytes, "UpdateDocument", params.clone()).await.unwrap();
+            println!("Update Doc Result: {}", String::from_utf8_lossy(&result));
+
+            
             println!("Reading directory of service...");
             // Read directory of service
             let params = vec!["catalog"];
