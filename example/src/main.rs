@@ -16,6 +16,8 @@ use tokio::io::AsyncReadExt;
 mod utils;
 use utils::{decrypt_image, write_to_file};
 
+mod app;
+use app::{run_program};
 
 
 #[derive(Parser, Debug)]
