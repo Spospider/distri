@@ -1,20 +1,20 @@
 // implement peer class here, keeping the client purely for communication with the cloud
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::collections::HashMap;
+use std::time::Duration;
+use std::path::Path;
+
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use std::sync::Arc;
+use tokio::fs;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
+
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use tokio::time::Duration;
-use std::time::Duration;
-use crate::utils::{send_reliable, recv_reliable, DEFAULT_TIMEOUT};
-use crate::client::Client;
+use crate::utils::{send_with_retry, recv_with_timeout, recv_reliable, server_encrypt_img, server_decrypt_img, DEFAULT_TIMEOUT, MAX_RETRIES, CHUNK_SIZE};
 
-use std::path::Path;
-use std::fs;
-use base64;
-
+//use crate::client::Client;
 
 pub struct Peer {
     pub peer_id: u16,
@@ -22,7 +22,7 @@ pub struct Peer {
     pub cloud_address: SocketAddr,               // Address of the cloud (central server or leader)
     pub server_addresses: Arc<Mutex<Vec<SocketAddr>>>, // List of known servers
     pub collections: Arc<Mutex<HashMap<String, Vec<Value>>>>, // Local data storage
-    client:Client, //we should use a client object here for as the cloud communication middleware.
+    //client:Client, //we should use a client object here for as the cloud communication middleware.
 }
 
 
@@ -115,27 +115,29 @@ impl Peer {
         }
     }
     
+
     pub async fn send_image(
         socket: &UdpSocket,
         image_path: &Path,
         recipient_addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Read the image from the given path
-        let image_bytes = fs::read(image_path)?;
+        // Read the image asynchronously from the given path
+        let image_bytes = fs::read(image_path).await?;
         let image_base64 = base64::encode(image_bytes);
-
+    
         // Create the message
         let file_name = image_path.file_name()
             .ok_or("Invalid file name")?
             .to_string_lossy();
         let message = format!("SendImage:{}:{}", file_name, image_base64);
-
+    
         // Send the message with retry logic
         send_with_retry(socket, message.as_bytes(), recipient_addr, MAX_RETRIES).await?;
         println!("Image '{}' sent to {}", file_name, recipient_addr);
-
+    
         Ok(())
     }
+
 
     pub async fn get_image(
         socket: &UdpSocket,
@@ -147,12 +149,12 @@ impl Peer {
         let request_message = format!("RequestImage:{}", image_name);
         send_with_retry(socket, request_message.as_bytes(), peer_addr, MAX_RETRIES).await?;
         println!("Requested image '{}' from {}", image_name, peer_addr);
-    
+
         // Receive the image data
         match recv_reliable(socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
             Ok((data, _, _)) => {
                 let response = String::from_utf8_lossy(&data);
-    
+
                 // Parse the received response
                 if !response.starts_with("Image:") {
                     return Err("Unexpected response format".into());
@@ -163,13 +165,13 @@ impl Peer {
                 }
                 let received_name = parts[1];
                 let image_base64 = parts[2];
-    
-                // Decode and save the image
+
+                // Decode and save the image asynchronously
                 let image_bytes = base64::decode(image_base64)?;
                 let save_path = save_dir.join(received_name);
-                fs::write(&save_path, &image_bytes)?;
+                fs::write(&save_path, &image_bytes).await?;
                 println!("Image '{}' saved to {}", received_name, save_path.display());
-    
+
                 Ok(())
             }
             Err(e) => {
@@ -178,6 +180,7 @@ impl Peer {
             }
         }
     }
+
     
     pub async fn send_collection_to_server(
         socket: &UdpSocket,
@@ -222,49 +225,50 @@ impl Peer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Define the folder to scan
         let folder_path = "resources"; // add folder path
-    
-        // Read the folder contents
+
+        // Read the folder contents asynchronously
         let mut resources_info = Vec::new();
-        for entry in fs::read_dir(folder_path)? {
-            let entry = entry?;
-            let file_path = entry.path();
+        let mut entries = fs::read_dir(folder_path).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            // let file_path = entry.path();
             let file_name = entry.file_name().into_string().unwrap_or_default();
-    
+
             // Collect metadata
-            if let Ok(metadata) = entry.metadata() {
+            if let Ok(metadata) = entry.metadata().await {
                 let file_size = metadata.len();
-                let modified_time = metadata.modified().ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-    
+                // let modified_time = metadata.modified().await.ok()
+                //     .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                //     .map(|d| d.as_secs())
+                //     .unwrap_or(0);
+
                 // Add resource info
                 resources_info.push(json!({
                     "filename": file_name,
                     "size": file_size,
-                    "modified_time": modified_time,
+                    // "modified_time": modified_time,
                 }));
             }
         }
-    
+
         // Construct the JSON payload
         let payload = json!({
             "peer_addr": peer_addr.to_string(),
             "resources": resources_info,
         });
-    
+
         // Serialize the JSON payload
         let payload_str = serde_json::to_string(&payload)?;
         println!("Prepared payload: {}", payload_str);
-    
+
         // Create the request message
         let message = format!("PublishInfo:{}", payload_str);
-    
+
         // Send the payload with retry logic
         // TODO Use client here, and remove server_addr param, it will take care of sending
         send_with_retry(socket, message.as_bytes(), server_addr, MAX_RETRIES).await?;
         println!("Published info to server at {}", server_addr);
-    
+
         // Wait for acknowledgment
         match recv_reliable(socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
             Ok((ack_data, _, _)) => {
@@ -279,9 +283,159 @@ impl Peer {
                 return Err(Box::new(e));
             }
         }
+
+        Ok(())
+    }
+
+
+    // request_resource(peer_addr, resource_name, num_views) : request resource from peer for a certain number of views.
+    pub async fn request_resource(
+        &self,
+        peer_addr: SocketAddr,
+        resource_name: &str,
+        num_views: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Create the request message in JSON format
+        let request_message = serde_json::json!({
+            "action": "request_resource",
+            "resource_name": resource_name,
+            "num_views": num_views,
+        });
+    
+        // Send the request to the peer
+        send_with_retry(
+            &self.public_socket,
+            request_message.to_string().as_bytes(),
+            peer_addr,
+            MAX_RETRIES,
+        )
+        .await?;
+        println!(
+            "Requested resource '{}' with {} views from peer at {}",
+            resource_name, num_views, peer_addr
+        );
     
         Ok(())
     }
+    
+
+    /// grant_resource(peer_addr, resource_name, num_views) : grants and sends the resource to the other peer.
+    pub async fn grant_resource(
+        &self,
+        peer_addr: SocketAddr,
+        resource_name: &str,
+        num_views: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let resource_path = format!("./resources/{}", resource_name);
+    
+        // Check if the resource exists
+        if !tokio::fs::metadata(&resource_path).await.is_ok() {
+            eprintln!("Resource '{}' not found in the 'resources' folder.", resource_name);
+            return Err("Resource not found".into());
+        }
+    
+        // Read the resource content
+        let mut file = tokio::fs::File::open(&resource_path).await?;
+        let mut resource_content = Vec::new();
+        file.read_to_end(&mut resource_content).await?;
+        println!("Read resource '{}' from disk.", resource_name);
+    
+        // Prepare metadata (number of views, resource name) as JSON
+        let metadata = serde_json::json!({
+            "num_views": num_views,
+            "resource_name": resource_name,
+        });
+        let metadata_str = metadata.to_string();
+    
+        // Combine metadata and resource content
+        let combined_data = format!("{}|{}", metadata_str, base64::encode(&resource_content));
+    
+        // Encrypt the combined data by hiding it in a base image
+        let base_img_path = "resources/base_image.png"; // Base image to embed data
+        let encrypted_output_path = format!("resources/{}_encrypted.png", resource_name);
+    
+        server_encrypt_img(base_img_path, &combined_data, &encrypted_output_path).await;
+    
+        // Read the encrypted image as bytes
+        let mut encrypted_file = tokio::fs::File::open(&encrypted_output_path).await?;
+        let mut encrypted_data = Vec::new();
+        encrypted_file.read_to_end(&mut encrypted_data).await?;
+    
+        // Send the encrypted image to the peer
+        send_with_retry(&self.public_socket, &encrypted_data, peer_addr, MAX_RETRIES).await?;
+        println!(
+            "Granted resource '{}' with {} views to peer at {}",
+            resource_name, num_views, peer_addr
+        );
+    
+        Ok(())
+    }
+    
+
+    /// receive_resource(encrypted_img_path, output_dir) : receives an encrypted image from a peer and extract the hidden resource
+    pub async fn receive_resource(
+        &self,
+        encrypted_img_path: &str, // Path to save the received encrypted image
+        output_dir: &str,         // Directory to store decrypted resources
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Receive the encrypted image as bytes
+        let mut buffer = [0u8; CHUNK_SIZE];
+        let (received_len, sender_addr) = recv_with_timeout(
+            &self.public_socket,
+            &mut buffer,
+            Duration::from_secs(DEFAULT_TIMEOUT),
+        )
+        .await?;
+        let encrypted_data = &buffer[..received_len];
+        println!("Received encrypted resource from {}.", sender_addr);
+    
+        // Save the encrypted image to the specified path
+        let mut encrypted_file = tokio::fs::File::create(encrypted_img_path).await?;
+        encrypted_file.write_all(encrypted_data).await?;
+        println!("Saved encrypted image to '{}'.", encrypted_img_path);
+    
+        // Decrypt the image to extract the hidden data
+        let extracted_data_path = format!("{}/extracted_data.txt", output_dir); // Temporary storage for extracted data
+        server_decrypt_img(encrypted_img_path, &extracted_data_path).await?;
+    
+        // Read and parse the extracted data
+        let mut extracted_file = tokio::fs::File::open(&extracted_data_path).await?;
+        let mut extracted_content = String::new();
+        extracted_file.read_to_string(&mut extracted_content).await?;
+    
+        // Split the extracted data into metadata and resource content
+        let parts: Vec<&str> = extracted_content.splitn(2, '|').collect();
+        if parts.len() != 2 {
+            eprintln!("Malformed extracted data: {}", extracted_content);
+            return Err("Malformed extracted data".into());
+        }
+        let metadata_str = parts[0];
+        let resource_content_base64 = parts[1];
+    
+        // Parse metadata
+        let metadata: serde_json::Value = serde_json::from_str(metadata_str)?;
+        let num_views = metadata["num_views"].as_u64().ok_or("Invalid 'num_views' value")?;
+        let resource_name = metadata["resource_name"]
+            .as_str()
+            .ok_or("Invalid 'resource_name' value")?;
+        println!(
+            "Extracted metadata - Resource: '{}', Allowed Views: {}",
+            resource_name, num_views
+        );
+    
+        // Decode the resource content from Base64
+        let resource_content = base64::decode(resource_content_base64)?;
+    
+        // Save the resource content to a file
+        let resource_path = format!("{}/{}", output_dir, resource_name);
+        let mut resource_file = tokio::fs::File::create(&resource_path).await?;
+        resource_file.write_all(&resource_content).await?;
+        println!("Saved resource '{}' to '{}'.", resource_name, resource_path);
+    
+        Ok(())
+    }
+    
+
     // /// Request image encryption
     // pub async fn request_image_encryption(
     //     self: &Arc<Self>,
