@@ -28,16 +28,24 @@ pub struct Peer {
 
 // Functions to be implemented in peer:
 
-// done:
+/// done:
 // publish_info() : checks contents of resources folder, publishes a document of my own address and the list of resources (filenames) + maybe some file metadata to the cloud.
 // fetch_catalog() : fetches the 'catalog' collection from the cloud, returns the json.
 
-// needs encryption and decryption logic:
+/// Needs encryption and decryption logic:
 // request_resource(peer_addr, resource_name, num_views) : request resource from peer for a certain number of views.
 // grant_resource(peer_addr, resource_name, num_views) : grants and sends the resource to the other peer.
 
 
 impl Peer {
+    // TODO
+    // Have a list or queue of incoming requested resource, so that we can list the requests that are waiting to be granded.
+    // List for pending resources to be accepted by other pears.
+    // 
+
+    // work on server logic, building the inbox
+
+
     /// Create a new peer instance
     pub async fn new(peer_id: u16, bind_addr: &str, cloud_addr: &str) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         // Bind to the specified address

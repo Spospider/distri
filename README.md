@@ -91,7 +91,7 @@ Phase 2: **(CURRENT)**
         - List peer's own images and images they have access to as sort of 2 sections. (Main menu)
         - Image viewer: being able to view the images (decrypted in-mem).
         - Allow changing of permissions of published images through the interface.
-        - Popups for accepting incoming image access request from peers, owner can approve it directly, or modify the number of access rights.
+        - Menu for seeing inbox of incoming requests, you can grant requests, and modify the number of requests.
         - interface should not wait for anything, **its always interactive everything else in separate threads**, maybe show the waitlist for on-going requests. 
     - Adding the peer option to the Example file, to create a peer and start the interface, all interface logic will be in the example program, **peer is a middleware**.
 
