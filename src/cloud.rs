@@ -697,9 +697,15 @@ impl CloudNode {
                     };
                     
                     // Add random uuid
-                    let uuid = Uuid::new_v4().to_string();
+                    let mut uuid = Uuid::new_v4().to_string();
                     if let Value::Object(ref mut obj) = entry {
-                        obj.insert("UUID".to_string(), Value::String(uuid.clone()));
+                        // if UUID does not exist in obj
+                        if !obj.contains_key("UUID") {
+                            obj.insert("UUID".to_string(), Value::String(uuid.clone()));
+                        }
+                        else {
+                            uuid = obj["UUID"].as_str().unwrap().to_string();
+                        }
                     }
 
                     let mut collections = self.collections.lock().await;
@@ -759,7 +765,7 @@ impl CloudNode {
                     let packet = packet[..size].to_vec();
                     let data: String = String::from_utf8_lossy(&packet).trim().to_string();
                     
-                    let entry_to_update: Value = match serde_json::from_slice(&packet) {
+                    let mut entry_to_update: Value = match serde_json::from_slice(&packet) {
                         Ok(value) => value,
                         Err(e) => {
                             eprintln!("Failed to parse JSON: {:?}", e);
@@ -772,7 +778,7 @@ impl CloudNode {
                     };
 
                     // Extract ID for matching
-                    let id = if let Value::Object(ref obj) = entry_to_update {
+                    let id: String = if let Value::Object(ref obj) = entry_to_update {
                         if let Some(Value::String(id)) = obj.get("UUID") {
                             id.clone()
                         } else {
@@ -808,11 +814,29 @@ impl CloudNode {
                             println!("Sending Reply to {:?}", addr);
                             send_reliable(&socket, response.as_bytes(), addr).await?;
                             return Ok(response);
-                        } else {
-                            // Reply to sender
-                            let response = format!("Error: No document found with id '{}'.", id);
-                            send_reliable(&socket, response.as_bytes(), addr).await?;
+                        } else { // match not found, add to collection anyway
+                            // Add random uuid
+                            let mut uuid = Uuid::new_v4().to_string();
+                            if let Value::Object(ref mut obj) = entry_to_update {
+                                // if UUID does not exist in obj
+                                if !obj.contains_key("UUID") {
+                                    obj.insert("UUID".to_string(), Value::String(uuid.clone()));
+                                }
+                                else {
+                                    uuid = obj["UUID"].as_str().unwrap().to_string();
+                                }
+                            }
+                            table.push(entry_to_update);
+                            // update data version with any change in DB
+                            *self.db_data_version.lock().await += 1;
+                            println!("Added Doc: {}", data);
+
+                            // reply to sender
+                            let response = "Document added successfully".to_string();
+                            println!("Sending Reply to {:?}", addr);
+                            send_reliable(&socket, uuid.as_bytes(), addr).await?;
                             return Ok(response);
+
                         }
                     } else {
                         // Reply to sender

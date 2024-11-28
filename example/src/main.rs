@@ -59,7 +59,7 @@ async fn main() {
             }
 
             // define DB tables for directory of service
-            let table_names = Some(vec!["catalog"]);
+            let table_names = Some(vec!["catalog", "permissions"]);
 
             // Create and start the server
             let server = CloudNode::new(4, own_addr, Some(node_map), 1024, table_names).await.unwrap();
@@ -114,7 +114,7 @@ async fn main() {
                         failures += 1;
                     }
                 }
-                sleep(tokio::time::Duration::from_millis(50)).await; // Optional delay between requests
+                // sleep(tokio::time::Duration::from_millis(50)).await; // Optional delay between requests
             }
 
             let params = vec!["catalog"];
