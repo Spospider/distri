@@ -80,9 +80,9 @@ async fn main() {
             let mut client = Client::new(Some(node_map.clone()), Some(chunk_size));
 
             // Register all servers in the client node map
-            for (name, addr) in &node_map {
-                client.register_node(name.clone(), *addr);
-            }
+            // for (name, addr) in &node_map {
+            //     client.register_node(name.clone(), *addr);
+            // }
             let mut failures = 0;
 
             // Load test: Send 10_000 requests

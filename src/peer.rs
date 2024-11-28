@@ -14,15 +14,14 @@ use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use serde_json::{json, Value};
 use crate::utils::{send_with_retry, recv_with_timeout, recv_reliable, server_encrypt_img, server_decrypt_img, DEFAULT_TIMEOUT, MAX_RETRIES, CHUNK_SIZE};
 
-//use crate::client::Client;
+use crate::client::Client;
 
 pub struct Peer {
-    pub peer_id: u16,
     pub public_socket: Arc<UdpSocket>,            // Socket for communication
-    pub cloud_address: SocketAddr,               // Address of the cloud (central server or leader)
-    pub server_addresses: Arc<Mutex<Vec<SocketAddr>>>, // List of known servers
     pub collections: Arc<Mutex<HashMap<String, Vec<Value>>>>, // Local data storage
-    //client:Client, //we should use a client object here for as the cloud communication middleware.
+    client:Client, //we should use a client object here for as the cloud communication middleware.
+
+
 }
 
 
@@ -47,22 +46,30 @@ impl Peer {
 
 
     /// Create a new peer instance
-    pub async fn new(peer_id: u16, bind_addr: &str, cloud_addr: &str) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+    pub async fn new(address: SocketAddr, cloud_nodes: Option<HashMap<String, SocketAddr>>) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         // Bind to the specified address
-        let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
-        // Parse the cloud address
-        let cloud_addr: SocketAddr = cloud_addr.parse()?;
+        let socket = Arc::new(UdpSocket::bind(address).await?);
+        
+        // Initialize the client for cloud interaction
+        let mut client = Client::new(cloud_nodes, None);
 
         // Initialize the peer instance
-        let peer = Arc::new(Self {
-            peer_id,
+        let peer = Arc::new(Peer {
             public_socket: socket,
-            cloud_address: cloud_addr,
-            server_addresses: Arc::new(Mutex::new(Vec::new())), // Start with an empty server list
             collections: Arc::new(Mutex::new(HashMap::new())),  // Start with an empty collection
+            client,
         });
 
         Ok(peer)
+    }
+    /// Registers a server node with the client
+    pub fn register_node(&mut self, name: String, address: SocketAddr) {
+        self.client.register_node(name, address);
+    }
+
+    pub async fn start_peer(&self) {
+        self.publish_info().await;
+
     }
 
     
@@ -232,7 +239,7 @@ impl Peer {
         peer_addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Define the folder to scan
-        let folder_path = "resources"; // add folder path
+        let folder_path = "resources/owned"; // add folder path
 
         // Read the folder contents asynchronously
         let mut resources_info = Vec::new();
@@ -254,7 +261,7 @@ impl Peer {
                 resources_info.push(json!({
                     "filename": file_name,
                     "size": file_size,
-                    // "modified_time": modified_time,
+                    "modified_time": format!("{:?}", metadata.modified()) ,
                 }));
             }
         }
