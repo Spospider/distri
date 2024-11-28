@@ -20,8 +20,6 @@ pub struct Peer {
     pub public_socket: Arc<UdpSocket>,            // Socket for communication
     pub collections: Arc<Mutex<HashMap<String, Vec<Value>>>>, // Local data storage
     client:Client, //we should use a client object here for as the cloud communication middleware.
-
-
 }
 
 
@@ -30,10 +28,9 @@ pub struct Peer {
 /// done:
 // publish_info() : checks contents of resources folder, publishes a document of my own address and the list of resources (filenames) + maybe some file metadata to the cloud.
 // fetch_catalog() : fetches the 'catalog' collection from the cloud, returns the json.
-
-/// Needs encryption and decryption logic:
 // request_resource(peer_addr, resource_name, num_views) : request resource from peer for a certain number of views.
 // grant_resource(peer_addr, resource_name, num_views) : grants and sends the resource to the other peer.
+
 
 
 impl Peer {
@@ -67,15 +64,46 @@ impl Peer {
         self.client.register_node(name, address);
     }
 
-    pub async fn start_peer(&self) {
-        self.publish_info().await;
+    pub async fn start_peer(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let peer_addr = self.public_socket.local_addr()?;
+        self.publish_info(peer_addr).await?;
 
+        Ok(())
     }
 
     
     // fetch_catalog() : fetches the 'catalog' collection from the cloud, returns the json.
     /// Fetch a collection from a server and store it locally
-    pub async fn fetch_catalog(
+    pub async fn fetch_catalog(&self) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+        // Define the service name and any parameters if needed
+        let service_name = "ReadCollection";
+        let params = vec!["catalog"]; // In case you want to specify table name as a parameter
+    
+        // Use `send_data_with_params` to send the request and receive the response
+        match self.client.send_data_with_params(Vec::new(), service_name, params).await {
+            Ok(response_data) => {
+                let response_message = String::from_utf8_lossy(&response_data);
+                println!("Received response: {}", response_message);
+    
+                // Parse the JSON response
+                let json_data: Vec<Value> = serde_json::from_str(&response_message)?;
+                println!("Parsed collection data:\n{}", serde_json::to_string_pretty(&json_data)?);
+    
+                // Save the collection locally
+                let mut collections = self.collections.lock().await;
+                collections.insert("catalog".to_string(), json_data.clone());
+                println!("Saved collection 'catalog' locally.");
+    
+                Ok(json_data)
+            }
+            Err(e) => {
+                eprintln!("Error during fetch_catalog: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+    
+    /* pub async fn fetch_catalog(
         &self,
         server_addr: SocketAddr,
     ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
@@ -120,7 +148,7 @@ impl Peer {
                 collections.insert(tablename.to_string(), json_data.clone());
                 println!("Saved collection '{}' locally.", tablename);
     
-
+    
                 Ok(json_data)
             }
             Err(e) => {
@@ -128,7 +156,7 @@ impl Peer {
                 Err(Box::new(e))
             }
         }
-    }
+    } */
     
 
     pub async fn send_image(
@@ -196,8 +224,38 @@ impl Peer {
         }
     }
 
-    
+
     pub async fn send_collection_to_server(
+        &self,
+        collection_name: &str,
+        collection_data: &HashMap<String, Value>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Serialize the collection data to JSON
+        let json_data = serde_json::to_string(collection_data)?;
+        println!("Serialized collection '{}': {}", collection_name, json_data);
+    
+        // Build the service name and parameters
+        let service_name = "SendCollection";
+        let params = vec![collection_name];
+    
+        // Send the request and data using `send_data_with_params`
+        match self.client.send_data_with_params(json_data.into_bytes(), service_name, params).await {
+            Ok(response_data) => {
+                let response_message = String::from_utf8_lossy(&response_data);
+                if response_message != "OK" {
+                    return Err(format!("Server returned error: {}", response_message).into());
+                }
+                println!("Server acknowledged collection '{}'", collection_name);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Error during send_collection_to_server: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+    
+    /* pub async fn send_collection_to_server(
         socket: &UdpSocket,
         server_addr: SocketAddr,
         collection_name: &str,
@@ -230,10 +288,68 @@ impl Peer {
         }
     
         Ok(())
-    }
+    } */
+
 
     // publish_info() : checks contents of resources folder, publishes a document of my own address and the list of resources (filenames) + maybe some file metadata to the cloud.
     pub async fn publish_info(
+        &self,
+        peer_addr: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Define the folder to scan
+        let folder_path = "resources/owned"; // Add folder path
+    
+        // Read the folder contents asynchronously
+        let mut resources_info = Vec::new();
+        let mut entries = fs::read_dir(folder_path).await?;
+    
+        while let Some(entry) = entries.next_entry().await? {
+            let file_name = entry.file_name().into_string().unwrap_or_default();
+    
+            // Collect metadata
+            if let Ok(metadata) = entry.metadata().await {
+                let file_size = metadata.len();
+    
+                resources_info.push(json!({
+                    "filename": file_name,
+                    "size": file_size,
+                    "modified_time": format!("{:?}", metadata.modified()),
+                }));
+            }
+        }
+    
+        // Construct the JSON payload
+        let payload = json!({
+            "peer_addr": peer_addr.to_string(),
+            "resources": resources_info,
+        });
+    
+        // Serialize the JSON payload
+        let payload_str = serde_json::to_string(&payload)?;
+        println!("Prepared payload: {}", payload_str);
+    
+        let service_name = "PublishInfo";
+        match self
+            .client
+            .send_data(payload_str.into_bytes(), service_name)
+            .await
+        {
+            Ok(response_data) => {
+                let response_message = String::from_utf8_lossy(&response_data);
+                if response_message != "OK" {
+                    return Err(format!("Server returned error: {}", response_message).into());
+                }
+                println!("Server acknowledged publish_info request.");
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Error during publish_info: {}", e);
+                Err(Box::new(e))
+            }
+        }
+    }
+    
+    /* pub async fn publish_info(
         socket: &UdpSocket,
         server_addr: SocketAddr,
         peer_addr: SocketAddr,
@@ -280,7 +396,6 @@ impl Peer {
         let message = format!("PublishInfo:{}", payload_str);
 
         // Send the payload with retry logic
-        // TODO Use client here, and remove server_addr param, it will take care of sending
         send_with_retry(socket, message.as_bytes(), server_addr, MAX_RETRIES).await?;
         println!("Published info to server at {}", server_addr);
 
@@ -300,7 +415,7 @@ impl Peer {
         }
 
         Ok(())
-    }
+    } */
 
 
     // request_resource(peer_addr, resource_name, num_views) : request resource from peer for a certain number of views.
