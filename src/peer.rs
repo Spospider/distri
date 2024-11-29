@@ -77,10 +77,54 @@ impl Peer {
 
     pub async fn start(self: &Arc<Self>) -> Result<(), Box<dyn std::error::Error>> {
         self.publish_info().await?;
-
+        
         // TODO write a function to fetch from directory of service 'permissions' collection to update 'inbox_queue' and 'available_resources' (if some requests were missed (leava a note concept))
         //  consider using the filter in ReadCollection, like in line 393 but with ReadCollection to get only 'grant' or only 'request' documents
         // call it here
+        // missing filter, could I filter here or do I have to do it in the function?
+        match self.fetch_collection("permissions").await {
+            Ok(permissions_data) => {
+                println!("Fetched permissions data: {:?}", permissions_data);
+        
+                // Update `inbox_queue`
+                let mut inbox = self.inbox_queue.lock().await;
+                for item in &permissions_data {
+                    if let Some(requester) = item["requester"].as_str() {
+                        let mut data = item.clone();
+                        data["requester"] = Value::String(requester.to_string());
+                        inbox.push(data);
+                    }
+                }
+        
+                // Update `available_resources`
+                let mut resources = self.available_resources.lock().await;
+                for item in &permissions_data {
+                    if let Some(provider) = item["provider"].as_str() {
+                        let mut data = item.clone();
+                        data["provider"] = Value::String(provider.to_string());
+                        resources.push(data);
+                    }
+                }
+                println!("Updated inbox_queue and available_resources.");
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch 'permissions' collection: {:?}", e);
+                return Err(e);
+            }
+        }
+        
+        /* self.client.send_data_with_params(Vec::new(), "ReadCollection", params).await?;
+        let permissions_str = String::from_utf8_lossy(&permissions);
+        let permissions_json: Vec<Value> = serde_json::from_str(&permissions_str)?;
+        let mut inbox = self.inbox_queue.lock().await;
+        let mut available = self.available_resources.lock().await;
+        for permission in permissions_json {
+            if permission["type"] == "request" {
+                inbox.push(permission);
+            } else if permission["type"] == "grant" {
+                available.push(permission);
+            }
+        } */
 
         // Init socket
         println!("Peer available on {:?}", self.public_socket.local_addr());
@@ -140,10 +184,33 @@ impl Peer {
                     }
                     if json_obj["num_views"].as_u64().unwrap() > 0 { // if 0, then resource grant is denied
                         // TODO complete receiving img, based on flow of grant_resource
-                        // send Ok
+                        // Send OK acknowledgment
+                        if let Err(e) = send_with_retry(&serve_self.public_socket, b"OK", addr, MAX_RETRIES).await {
+                            eprintln!("Failed to send acknowledgment: {:?}", e);
+                            continue;
+                        }
+                        // do recev_reliable to recieve img data, and save it in resources/borrowed as 'og_filename.encrp' to have uniform extention 
+                        let img_data = match recv_reliable(&serve_self.public_socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
+                            Ok((data, _, _)) => data,
+                            Err(e) => {
+                                eprintln!("Failed to receive image data: {:?}", e);
+                                continue;
+                            }
+                        };
+                        let og_filename = json_obj["resource_name"].as_str().unwrap_or("unknown");
+                        let output_path = format!("resources/borrowed/{}.encrp", og_filename);
+                        if let Err(e) = async {
+                            let mut file = tokio::fs::File::create(&output_path).await?;
+                            file.write_all(&img_data).await?;
+                            Ok::<(), std::io::Error>(())
+                        }
+                        .await
+                        {
+                            eprintln!("Failed to save received file '{}': {:?}", output_path, e);
+                            continue;
+                        }
+                        println!("Saved received resource '{}' as '{}'.", og_filename, output_path);
 
-                        // do recev_reliable to regieve img data, and save it in resources/borrowed as 'og_filename.encrp' to have uniforme extention 
-                        
                         // Update local resources list
                         let mut resources = serve_self.available_resources.lock().await;
                         resources.push(json_obj);
@@ -190,37 +257,47 @@ impl Peer {
 
     }
     
-    // fetch_catalog() : fetches the 'catalog' collection from the cloud, returns the json.
+    // fetch_collection() : fetches any collection from the cloud, returns the json.
     /// Fetch a collection from a server and store it locally
-    pub async fn fetch_catalog(&self) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-        // Define the service name and any parameters if needed
+    pub async fn fetch_collection(
+        &self,
+        collection_name: &str,
+    ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
         let service_name = "ReadCollection";
-        let params = vec!["catalog"]; // In case you want to specify table name as a parameter
+        let params = vec![collection_name];
     
         // Use `send_data_with_params` to send the request and receive the response
-        match self.client.send_data_with_params(Vec::new(), service_name, params).await {
+        match self
+            .client
+            .send_data_with_params(Vec::new(), service_name, params)
+            .await
+        {
             Ok(response_data) => {
                 let response_message = String::from_utf8_lossy(&response_data);
                 println!("Received response: {}", response_message);
     
                 // Parse the JSON response
                 let json_data: Vec<Value> = serde_json::from_str(&response_message)?;
-                println!("Parsed collection data:\n{}", serde_json::to_string_pretty(&json_data)?);
+                println!(
+                    "Parsed collection data for '{}':\n{}",
+                    collection_name,
+                    serde_json::to_string_pretty(&json_data)?
+                );
     
                 // Save the collection locally
                 let mut collections = self.collections.lock().await;
-                collections.insert("catalog".to_string(), json_data.clone());
-                println!("Saved collection 'catalog' locally.");
+                collections.insert(collection_name.to_string(), json_data.clone());
+                println!("Saved collection '{}' locally.", collection_name);
     
                 Ok(json_data)
             }
             Err(e) => {
-                eprintln!("Error during fetch_catalog: {}", e);
+                eprintln!("Error during fetch_collection: {}", e);
                 Err(Box::new(e))
             }
         }
     }
- 
+    
 
     // publish_info() : checks contents of resources folder, publishes a document of my own address and the list of resources (filenames) + maybe some file metadata to the cloud.
     pub async fn publish_info(&self) -> Result<(), Box<dyn std::error::Error>> {
