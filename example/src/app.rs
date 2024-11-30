@@ -63,7 +63,7 @@ fn parse_requests_or_grants(entries: Vec<Value>, entry_type: &str) -> Vec<(Strin
             };
 
             if let Some(Value::String(key_value)) = map.get(key_field) {
-                if let Some(Value::String(resource_name)) = map.get("resource_name") {
+                if let Some(Value::String(resource_name)) = map.get("resource") {
                     if let Some(Value::Number(num_views)) = map.get("num_views") {
                         if let Some(num_views) = num_views.as_u64() {
                             // Add to result vector
@@ -83,6 +83,7 @@ fn parse_requests_or_grants(entries: Vec<Value>, entry_type: &str) -> Vec<(Strin
 }
 
 fn clear_screen() {
+    return;
     print!("\x1B[2J\x1B[H"); // ANSI escape codes to clear the screen and move the cursor to the top-left corner
     io::stdout().flush().unwrap();
 }
@@ -203,7 +204,12 @@ pub async fn run_program(peer:&Arc<Peer>) {
                 let views = views.trim().parse::<u32>().unwrap_or(0);
 
                 // pending_requests.push((username, image_name, views));
-                peer.request_resource(username.as_str(), image_name.as_str(), views).await;
+                match peer.request_resource(username.as_str(), image_name.as_str(), views).await {
+                    Ok(_) => {println!("request sent!");}
+                    Err(e) => {
+                        eprintln!("Error with request_resource {}", e);
+                    }
+                }
                 println!("Request sent.");
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
@@ -235,13 +241,23 @@ pub async fn run_program(peer:&Arc<Peer>) {
 
                         match decision.trim() {
                             "a" => {
-                                peer.grant_resource(from_user, image, *views as u32).await;
+                                match peer.grant_resource(from_user, image, *views as u32).await {
+                                    Ok(_) => {println!("Accepted request!");}
+                                    Err(e) => {
+                                        eprintln!("Error with grant_Resource {}", e);
+                                    }
+                                }
                                 // granted_access.insert((from_user.to_string(), image.to_string()), *views);
-                                println!("Accepted request!");
+                                // println!("Accepted request!");
                             }
                             "r" => {
-                                peer.grant_resource(from_user, image, 0).await;
-                                println!("Rejected request!");
+                                match peer.grant_resource(from_user, image, 0).await {
+                                    Ok(_) => {println!("Accepted request!");}
+                                    Err(e) => {
+                                        eprintln!("Error with grant_Resource {}", e);
+                                    }
+                                }
+                                // println!("Rejected request!");
                             }
                             "u" => {
                                 println!("Enter the updated number of views:");

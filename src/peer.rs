@@ -52,9 +52,13 @@ impl Peer {
     pub async fn new(id:&str, address: SocketAddr, cloud_nodes: Option<HashMap<String, SocketAddr>>) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         // Bind to the specified address
         let socket = Arc::new(UdpSocket::bind(address).await?);
+
+        // Check if `address` exists in `cloud_nodes` and remove it
+        let mut nodes = cloud_nodes.clone().unwrap();
+        nodes.retain(|_, &mut addr| addr != address);
         
         // Initialize the client for cloud interaction
-        let client = Client::new(cloud_nodes, None);
+        let client = Client::new(Some(nodes), None);
 
         // Initialize the peer instance
         let peer = Arc::new(Peer {
@@ -131,6 +135,7 @@ impl Peer {
         let serve_self = self.clone();
         tokio::spawn(async move {
             loop {
+                println!("looping");
                 let mut buffer: Vec<u8> = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
                 let (size, addr) = match recv_with_timeout(&serve_self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                     Ok((size, addr)) => (size, addr), // Successfully received data
@@ -150,15 +155,15 @@ impl Peer {
                     Ok(json) => json,
                     Err(e) => {
                         eprintln!("Failed to parse JSON msg: {:?} {:?}", received_msg, e);
-                        continue // Handle the error appropriately, e.g., skip processing this data
+                        continue; // Handle the error appropriately, e.g., skip processing this data
                     }
                 };
 
                 if json_obj["type"] == "request" {
-                    serve_self.handle_request_msg(addr, json_obj).await;
+                    serve_self.handle_request_msg(addr.clone(), json_obj.clone()).await;
                 }
                 else if json_obj["type"] == "grant" {
-                    serve_self.handle_grant_msg(addr, json_obj).await;
+                    serve_self.handle_grant_msg(addr.clone(), json_obj.clone()).await;
                 }
             }
         });
@@ -193,6 +198,7 @@ impl Peer {
 
     async fn handle_grant_msg(&self, addr:SocketAddr, json_obj:Value) {
         let mut pending = self.pending_approval.lock().await;
+        println!("in handle_grant_msg");
 
         // Collect the items that match the condition into a separate vector
         let r_name = json_obj["resource"].clone();
@@ -201,24 +207,33 @@ impl Peer {
         let matched_items: Vec<Value> = pending.iter()
             .filter(|item| {
                 peer_id == item["provider"].as_str().unwrap_or("") 
-                && item["resource"] == r_name
+                && item["resource"].as_str().unwrap_or("1")  == r_name.as_str().unwrap_or("") 
             })
             .cloned()
             .collect();
+        println!("in handle_grant_msg1");
+        println!("{:?}", pending);
+        println!("{:?} = {:?}", peer_id,  pending[0]["provider"].as_str().unwrap_or("") );
+        println!("{:?} = {:?}", pending[0]["resource"].as_str().unwrap_or("1"),  r_name.as_str().unwrap_or(""));
 
         // If `matched_items` is empty, no items were filtered out
         if matched_items.is_empty() {
+            println!("in handle_grant_msg RETURNING");
             // did not request this resource, ignore it
             return;
         }
+
         if json_obj["num_views"].as_u64().unwrap() > 0 { // if 0, then resource grant is denied
             // Send OK acknowledgment
-            if let Err(e) = send_with_retry(&self.public_socket, b"OK", addr, MAX_RETRIES).await {
+            let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+            println!("in handle_grant_msg sending ok");
+            if let Err(e) = send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await {
                 eprintln!("Failed to send acknowledgment: {:?}", e);
                 return;
             }
+            println!("in handle_grant_msg2");
             // do recev_reliable to recieve img data, and save it in resources/borrowed as 'og_filename.encrp' to have uniform extention 
-            let img_data = match recv_reliable(&self.public_socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
+            let img_data = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((data, _, _)) => data,
                 Err(e) => {
                     eprintln!("Failed to receive image data: {:?}", e);
@@ -338,10 +353,10 @@ impl Peer {
         let params = vec!["users"];
         let result = self.client.send_data_with_params(payload.as_bytes().to_vec(), "ReadCollection", params.clone())
         .await.expect("Failed to resolve name from DOS.");
-        match String::from_utf8(result.clone()) {
-            Ok(result_str) => println!("{}", result_str),
-            Err(e) => eprintln!("Failed to convert result to string: {}", e),
-        }
+        // match String::from_utf8(result.clone()) {
+        //     Ok(result_str) => println!("{}", result_str),
+        //     Err(e) => eprintln!("Failed to convert result to string: {}", e),
+        // }
         let data:Vec<Value> = serde_json::from_slice(&result.clone()).expect("failed to parse json resolved");
         // check if data has a first entry, if so, 
         // let address = take data[0]["addr"]
@@ -357,6 +372,7 @@ impl Peer {
             eprintln!("ID not registered.");
             return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Decryption failed")));
         }
+        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "No address was found")));
 
     }
     
@@ -458,7 +474,7 @@ impl Peer {
             "type": "request",
             "user" : *self.id.clone(),
             "provider" : peer_id,
-            "resource_name": resource_name,
+            "resource": resource_name,
             "num_views": num_views,
             "UUID": format!("req:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
         });
@@ -495,6 +511,7 @@ impl Peer {
         resource_name: &str,
         num_views: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        println!("grant_resource1");
         
         let resource_path = format!("./resources/encrypted/{}.encrp", resource_name);
     
@@ -503,11 +520,13 @@ impl Peer {
             eprintln!("Resource '{}' not found in the 'resources' folder.", resource_name);
             return Err("Resource not found".into());
         }
+        println!("grant_resource2");
         let myself = self.clone();
         let resource_n = resource_name.to_string();
         let peer_id_ = peer_id.to_string();
+        println!("grant_resource3");
 
-        tokio::spawn(async move {
+        // tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
 
             // update directory of service with this permission grant
@@ -521,6 +540,8 @@ impl Peer {
                 "UUID": format!("grant:{:?}|{:?}|{}", myself.id, peer_id_, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
             }).to_string();
             let params = vec!["permissions"];
+            println!("grant_resource4");
+            
             let _ =  myself.client.send_data_with_params(entry.as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
 
             // pop from local inbox, based on user and resource_name
@@ -528,9 +549,11 @@ impl Peer {
             inbox.retain(|item| {
                 !(peer_id_ == item["user"].as_str().unwrap_or("") && item["resource"].as_str() == Some(&resource_n))
             });
+            println!("grant_resource4");
 
             // send grant message  to peer to exchange data 
-            let _ = match send_with_retry(&socket, entry.as_bytes(), myself.resolve_id(peer_id_.as_str()).await.expect("Failed grant resource"), MAX_RETRIES).await {
+            println!("sending grant resource to {}", myself.resolve_id(peer_id_.as_str()).await.unwrap());
+            let _ = match send_with_retry(&socket, entry.as_bytes(), myself.resolve_id(peer_id_.as_str()).await.expect("Failed grant address resolve"), MAX_RETRIES).await {
                 Ok(()) => (), // Successfully received data
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     // unreachable peer
@@ -539,6 +562,7 @@ impl Peer {
                     eprintln!("Failed to send to peer: {:?}", e);
                 }
             };
+            println!("grant_resource5");
 
             // await OK
             let mut buffer = [0u8; 1024];
@@ -546,13 +570,15 @@ impl Peer {
             let (size, addr) = match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                 Ok ((size, addr)) => (size, addr),
                 Err(_) => {
-                    return;
+                    return Err("Ok timed out".into());
+                    // return;
                 }
             };
 
             let response = String::from_utf8_lossy(&buffer[..size]);
             if response != "OK" {
-                return;
+                return Err("No ok".into());
+                // return;
             }
 
             // let mut encrypted_data =  match myself.encrypt_img(&resource_path, num_views).await {
@@ -596,7 +622,7 @@ impl Peer {
             let _ =  myself.client.send_data_with_params(filter.as_bytes().to_vec(), "DeleteDocument", params.clone()).await.unwrap();
             
             
-        });
+        // });
     
         Ok(())
     }

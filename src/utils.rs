@@ -266,7 +266,7 @@ pub async fn recv_reliable(socket: &UdpSocket, duration:Option<Duration>) -> Res
         
         // Check if the chunk contains at least the sequence number (8 bytes)
         if size <= 8 {
-            eprintln!("Received packet too small to contain a sequence number");
+            // eprintln!("Received packet too small to contain a sequence number");
             continue; // Ignore incomplete packet
         }
 

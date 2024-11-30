@@ -187,9 +187,7 @@ async fn main() {
             // Initialize server and other nodes in the network
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
             for (i, addr) in other_ips.iter().enumerate() {
-                if i > 0 { // skip first index as thats the peer addr
-                    node_map.insert(addr.port().to_string(), *addr);
-                }
+                node_map.insert(addr.port().to_string(), *addr);
             }
 
             // Create and start the server
