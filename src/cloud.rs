@@ -962,8 +962,73 @@ impl CloudNode {
         // send ok
         send_with_retry(&socket, b"OK", addr, 5).await?;
         println!("Sent 'OK' message for AddEntry to {}", addr);
-        
 
+        // if there is filtering info
+        match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
+            Ok((packet, size, recv_addr)) if recv_addr == addr => {
+                let packet = packet[..size].to_vec();
+                
+                let entry: Value = match serde_json::from_slice(&packet) {
+                    Ok(value) => value, // Only proceed if it's an object
+                    Err(e) => {
+                        eprintln!("Failed to parse JSON: {:?}", e);
+
+                        // reply to sender
+                        let response = format!("Error:Failed to parse JSON: {:?}", e);
+                        send_reliable(&socket, response.as_bytes(), addr).await?;
+                        return Err(Error::new(ErrorKind::Other, "Failed to parse JSON"));
+                    }
+                };
+
+                // Ensure `entry` is a JSON object for matching
+                let entry_object = match entry.as_object() {
+                    Some(obj) => obj,
+                    None => {
+                        let response = format!("Error:Entry is not a JSON object {:?}", entry);
+                        send_reliable(&socket, response.as_bytes(), addr).await?;
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Entry must be a JSON object"));
+                    }
+                };
+
+                let mut collections = self.collections.lock().await;
+                if let Some(table) = collections.get_mut(table_name) {
+                    // entry represents dict on fields to match on 
+                    // example: { "provider" : "abc" }
+
+                    // get only entries that do NOT match all the fields in `entry_object`
+                    let matched_entries: Vec<Value> = table.iter().filter(|existing_entry| {
+                        // Check if the existing entry is a JSON object
+                        existing_entry.as_object().map_or(false, |existing_fields| {
+                            // Ensure all fields in `entry_object` match the corresponding fields in `existing_fields`
+                            entry_object.iter().all(|(key, value)| {
+                                existing_fields.get(key) == Some(value)
+                            })
+                        })
+                    }).cloned().collect();
+
+                    // reply to sender
+                    let response = Value::Array(matched_entries).to_string();
+                    send_reliable(&socket, response.as_bytes(), addr).await?;
+                    return Ok(response);
+                }
+                else {
+                    // reply to sender
+                    let response = format!("Table '{}' does not exist.", table_name);
+                    send_reliable(&socket, response.as_bytes(), addr).await?;
+                    return Ok(response);
+                }
+            },
+            Ok((_, _, recv_addr)) => {
+                // eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                // // Ignore and continue to wait for correct address
+                (0, 0, recv_addr)
+            },
+            Err(_) => {
+                (0, 0, "0.0.0.0:0".parse().unwrap())
+            }
+        };
+        
+        // fetch all data
         // Access the collections and attempt to fetch the requested table
         let collections = self.collections.lock().await.clone();
         if let Some(table) = collections.get(table_name) {

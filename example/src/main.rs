@@ -1,6 +1,7 @@
 use clap::Parser; 
 use distri::client::Client;
 use distri::cloud::CloudNode;
+use distri::peer::Peer;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,7 +46,7 @@ async fn main() {
         .map(|ip| ip.parse().expect("Failed to parse an IP address")) // Parse each unique String to SocketAddr
         .collect(); // Collect the results into a Vec<SocketAddr>
 
-    let own_addr:SocketAddr = args.ips[0].parse().expect("REASON");
+    let own_addr:SocketAddr = args.ips[0].parse().expect("Failed to parse an Socket address");
 
     match mode.as_str() {
         "server" => {
@@ -131,15 +132,22 @@ async fn main() {
                         "thumbnail" : "value"
                     }
                 },
+                "doc" : "1",
                 "provider" : "127.0.0.1:1234"
             }); 
             // converted to an array of bytes
             let client_catalogue_bytes = to_vec(&client_catalogue).expect("Failed to serialize JSON");
-
             println!("pushing to DB...");
-
             let result = client.send_data_with_params(client_catalogue_bytes, "AddDocument", params.clone()).await.unwrap();
             println!("Add Doc Result: {}", String::from_utf8_lossy(&result));
+
+            // converted to an array of bytes
+            client_catalogue["doc"] = Value::String("2".to_string());
+            let client_catalogue_bytes = to_vec(&client_catalogue).expect("Failed to serialize JSON");
+            println!("pushing to DB...");
+            let result = client.send_data_with_params(client_catalogue_bytes, "AddDocument", params.clone()).await.unwrap();
+            println!("Add Doc Result: {}", String::from_utf8_lossy(&result));
+
             client_catalogue["UUID"] = Value::String(String::from_utf8_lossy(&result).to_string());
             client_catalogue["New thing"] = Value::String("some txt".to_string());
 
@@ -150,6 +158,13 @@ async fn main() {
 
             
             println!("Reading directory of service...");
+            // Read directory of service filtered
+            let mut filter =json!({
+                "doc" : "1"
+            }); 
+            let params = vec!["catalog"];
+            let result = client.send_data_with_params(to_vec(&filter).expect(""), "ReadCollection", params).await.unwrap();
+            println!("Directory of Service Result:\n{}", String::from_utf8_lossy(&result));
             // Read directory of service
             let params = vec!["catalog"];
             let result = client.send_data_with_params(Vec::new(), "ReadCollection", params).await.unwrap();
@@ -165,6 +180,23 @@ async fn main() {
                 println!("Total Test Time: {}", elapsed.as_secs_f64());
             }
         }
+        "peer" => {
+            // Server Mode
+            // let identifier = args.identifier.unwrap_or(10);
+
+            // Initialize server and other nodes in the network
+            let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
+            for (i, addr) in other_ips.iter().enumerate() {
+                if i > 0 { // skip first index as thats the peer addr
+                    node_map.insert(addr.port().to_string(), *addr);
+                }
+            }
+
+            // Create and start the server
+            let peer = Peer::new(own_addr, Some(node_map)).await.unwrap();
+            run_program(&Arc::new(peer)).await;
+            
+        }
         _ => {
             eprintln!("Invalid mode specified. Use 'server' or 'client'.");
         }
@@ -177,4 +209,6 @@ async fn main() {
 
 // cargo run -- --mode client --report --ips 127.0.0.1:3000,127.0.0.1:3001
 
+// cargo run -- --mode peer --ips 127.0.0.1:2000,127.0.0.1:3000,127.0.0.1:3001
+// the first address is the peer's public address
 

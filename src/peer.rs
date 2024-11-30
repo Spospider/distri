@@ -12,7 +12,7 @@ use tokio::fs;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
-use serde_json::{json, Value};
+use serde_json::{to_vec, Value, json};
 use crate::utils::{recv_reliable, recv_with_timeout, send_reliable, send_with_retry, server_decrypt_img, server_encrypt_img, CHUNK_SIZE, DEFAULT_TIMEOUT, MAX_RETRIES};
 
 use crate::client::Client;
@@ -76,55 +76,53 @@ impl Peer {
 
 
     pub async fn start(self: &Arc<Self>) -> Result<(), Box<dyn std::error::Error>> {
+        // Publish my catalog
         self.publish_info().await?;
         
-        // TODO write a function to fetch from directory of service 'permissions' collection to update 'inbox_queue' and 'available_resources' (if some requests were missed (leava a note concept))
-        //  consider using the filter in ReadCollection, like in line 393 but with ReadCollection to get only 'grant' or only 'request' documents
-        // call it here
-        // missing filter, could I filter here or do I have to do it in the function?
-        match self.fetch_collection("permissions").await {
-            Ok(permissions_data) => {
-                println!("Fetched permissions data: {:?}", permissions_data);
-        
-                // Update `inbox_queue`
-                let mut inbox = self.inbox_queue.lock().await;
-                for item in &permissions_data {
-                    if let Some(requester) = item["requester"].as_str() {
-                        let mut data = item.clone();
-                        data["requester"] = Value::String(requester.to_string());
-                        inbox.push(data);
-                    }
+        // Get up to date with the cloud
+        let filter = json!({
+            "type" : "request",
+            "provider" : format!("{:?}",self.public_socket.local_addr()).as_str(),
+        });
+        let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
+        // Update `inbox_queue`
+        let mut inbox: tokio::sync::MutexGuard<'_, Vec<Value>> = self.inbox_queue.lock().await;
+        for item in &cloud_transactions {
+            // check if types is request, and i am the provider
+            // if item["type"].as_str() == Some("request") && item["provider"].as_str() == Some(format!("{:?}",self.public_socket.local_addr()).as_str()) {
+                if let Some(requester) = item["requester"].as_str() {
+                    let mut data = item.clone();
+                    data["requester"] = Value::String(requester.to_string());
+                    inbox.push(data);
                 }
-        
-                // Update `available_resources`
-                let mut resources = self.available_resources.lock().await;
-                for item in &permissions_data {
-                    if let Some(provider) = item["provider"].as_str() {
-                        let mut data = item.clone();
-                        data["provider"] = Value::String(provider.to_string());
-                        resources.push(data);
-                    }
-                }
-                println!("Updated inbox_queue and available_resources.");
-            }
-            Err(e) => {
-                eprintln!("Failed to fetch 'permissions' collection: {:?}", e);
-                return Err(e);
-            }
+            // }
         }
+
+        // Get up to date with the cloud
+        let filter = json!({
+            "type" : "grant",
+            "user" : format!("{:?}",self.public_socket.local_addr()).as_str(),
+        });
+        let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
         
-        /* self.client.send_data_with_params(Vec::new(), "ReadCollection", params).await?;
-        let permissions_str = String::from_utf8_lossy(&permissions);
-        let permissions_json: Vec<Value> = serde_json::from_str(&permissions_str)?;
-        let mut inbox = self.inbox_queue.lock().await;
-        let mut available = self.available_resources.lock().await;
-        for permission in permissions_json {
-            if permission["type"] == "request" {
-                inbox.push(permission);
-            } else if permission["type"] == "grant" {
-                available.push(permission);
-            }
-        } */
+        // Check missed grants, and resend request for them
+        for item in &cloud_transactions {
+            // if its a grant transaction and i am the user
+            // if item["type"].as_str() == Some("grant") && item["user"].as_str() == Some(format!("{:?}",self.public_socket.local_addr()).as_str()) {
+                if let Some(addrstr) = item["provider"].as_str() {
+                    if let Some(provider) = addrstr.parse::<SocketAddr>().ok(){
+                        if let Some(resource_name) = item["resource_name"].as_str() {
+                            if let Some(num_views) = item["num_views"].as_u64() {
+                                // request it from peer again
+                                self.request_resource(provider, resource_name, num_views as u32).await.unwrap_or_default();
+                                // peer should then send a grant resource
+                            }
+                        }
+                    }
+                }
+            // }
+        }
+
 
         // Init socket
         println!("Peer available on {:?}", self.public_socket.local_addr());
@@ -158,74 +156,99 @@ impl Peer {
                 };
 
                 if json_obj["type"] == "request" {
-                    // Add to inbox list
-                    let mut data = json_obj.clone();
-                    data["requester"] = Value::String(addr.to_string());
-                    let mut inbox = serve_self.inbox_queue.lock().await;
-                    inbox.push(json_obj);
+                    serve_self.handle_request_msg(addr, json_obj).await;
                 }
                 else if json_obj["type"] == "grant" {
-                    let mut pending = serve_self.pending_approval.lock().await;
-
-                    // Collect the items that match the condition into a separate vector
-                    let r_name = json_obj["resource"].clone();
-                    let matched_items: Vec<Value> = pending.iter()
-                        .filter(|item| {
-                            addr.to_string().as_str() == item["provider"].as_str().unwrap_or("") 
-                            && item["resource"] == r_name
-                        })
-                        .cloned()
-                        .collect();
-
-                    // If `matched_items` is empty, no items were filtered out
-                    if matched_items.is_empty() {
-                        // did not request this resource, ignore it
-                        continue;
-                    }
-                    if json_obj["num_views"].as_u64().unwrap() > 0 { // if 0, then resource grant is denied
-                        // TODO complete receiving img, based on flow of grant_resource
-                        // Send OK acknowledgment
-                        if let Err(e) = send_with_retry(&serve_self.public_socket, b"OK", addr, MAX_RETRIES).await {
-                            eprintln!("Failed to send acknowledgment: {:?}", e);
-                            continue;
-                        }
-                        // do recev_reliable to recieve img data, and save it in resources/borrowed as 'og_filename.encrp' to have uniform extention 
-                        let img_data = match recv_reliable(&serve_self.public_socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
-                            Ok((data, _, _)) => data,
-                            Err(e) => {
-                                eprintln!("Failed to receive image data: {:?}", e);
-                                continue;
-                            }
-                        };
-                        let og_filename = json_obj["resource_name"].as_str().unwrap_or("unknown");
-                        let output_path = format!("resources/borrowed/{}.encrp", og_filename);
-                        if let Err(e) = async {
-                            let mut file = tokio::fs::File::create(&output_path).await?;
-                            file.write_all(&img_data).await?;
-                            Ok::<(), std::io::Error>(())
-                        }
-                        .await
-                        {
-                            eprintln!("Failed to save received file '{}': {:?}", output_path, e);
-                            continue;
-                        }
-                        println!("Saved received resource '{}' as '{}'.", og_filename, output_path);
-
-                        // Update local resources list
-                        let mut resources = serve_self.available_resources.lock().await;
-                        resources.push(json_obj);
-                    }
-                    // Pop from pending
-                    pending.retain(|item| {
-                        !(addr.to_string().as_str() == item["provider"].as_str().unwrap_or("") && item["resource"].as_str() == r_name.as_str())
-                    });
+                    serve_self.handle_grant_msg(addr, json_obj).await;
                 }
             }
         });
         Ok(())
     }
+    async fn handle_request_msg(self: &Arc<Self>, addr:SocketAddr, json_obj:Value) {
+        // Add to inbox list
+        let data = json_obj.clone();
+        let resource_name = data["resource_name"].as_str().unwrap_or("NULL");
+        // check if request has been granted before from DOS, and grant automatically if so.
+        let filter = json!({
+            "UUID": format!("grant:{:?}|{:?}|{}", self.public_socket.local_addr(), addr, resource_name),
+        });
+        let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch 'permissions' collection");
+        for item in &cloud_transactions {
+            // check if types is request, and i am the provider
+            if item["num_views"].as_u64().unwrap_or(0) > 0  && item["remaining"].as_u64().unwrap_or(0) < item["num_views"].as_u64().unwrap_or(0) {
+                // send grant msg automatically
+                let num_views = (item["num_views"].as_u64().unwrap_or(0) - item["remaining"].as_u64().unwrap_or(0)) as u32;
+                self.grant_resource(addr, resource_name, num_views).await.unwrap_or_default();
 
-    pub async fn encrypt_img(&self, file_name:&str, num_views:u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+                return;
+            }
+        }
+
+
+        // if not then add to inbox
+        let mut inbox = self.inbox_queue.lock().await;
+        inbox.push(data);
+    }
+
+    async fn handle_grant_msg(&self, addr:SocketAddr, json_obj:Value) {
+        let mut pending = self.pending_approval.lock().await;
+
+        // Collect the items that match the condition into a separate vector
+        let r_name = json_obj["resource"].clone();
+        let matched_items: Vec<Value> = pending.iter()
+            .filter(|item| {
+                addr.to_string().as_str() == item["provider"].as_str().unwrap_or("") 
+                && item["resource"] == r_name
+            })
+            .cloned()
+            .collect();
+
+        // If `matched_items` is empty, no items were filtered out
+        if matched_items.is_empty() {
+            // did not request this resource, ignore it
+            return;
+        }
+        if json_obj["num_views"].as_u64().unwrap() > 0 { // if 0, then resource grant is denied
+            // TODO complete receiving img, based on flow of grant_resource
+            // Send OK acknowledgment
+            if let Err(e) = send_with_retry(&self.public_socket, b"OK", addr, MAX_RETRIES).await {
+                eprintln!("Failed to send acknowledgment: {:?}", e);
+                return;
+            }
+            // do recev_reliable to recieve img data, and save it in resources/borrowed as 'og_filename.encrp' to have uniform extention 
+            let img_data = match recv_reliable(&self.public_socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
+                Ok((data, _, _)) => data,
+                Err(e) => {
+                    eprintln!("Failed to receive image data: {:?}", e);
+                    return;
+                }
+            };
+            let og_filename = json_obj["resource_name"].as_str().unwrap_or("unknown");
+            let output_path = format!("resources/borrowed/{}.encrp", og_filename);
+            if let Err(e) = async {
+                let mut file = tokio::fs::File::create(&output_path).await?;
+                file.write_all(&img_data).await?;
+                Ok::<(), std::io::Error>(())
+            }
+            .await
+            {
+                eprintln!("Failed to save received file '{}': {:?}", output_path, e);
+                return;
+            }
+            println!("Saved received resource '{}' as '{}'.", og_filename, output_path);
+
+            // Update local resources list
+            let mut resources = self.available_resources.lock().await;
+            resources.push(json_obj);
+        }
+        // Pop from pending
+        pending.retain(|item| {
+            !(addr.to_string().as_str() == item["provider"].as_str().unwrap_or("") && item["resource"].as_str() == r_name.as_str())
+        });
+    }
+
+    async fn encrypt_img(&self, file_name:&str, num_views:u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let file_path: PathBuf = Path::new("resources/owned").join(file_name);
 
         // Read the file data to be sent
@@ -259,17 +282,26 @@ impl Peer {
     
     // fetch_collection(): fetches any collection from the cloud, returns the json.
     /// Fetch a collection from a server and store it locally
-    pub async fn fetch_collection(
+    async fn fetch_collection(
         &self,
         collection_name: &str,
+        filter: Option<Value>,
     ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
         let service_name = "ReadCollection";
         let params = vec![collection_name];
     
         // Use `send_data_with_params` to send the request and receive the response
+        let filter_data:Vec<u8>;
+        if filter.is_some() {
+            filter_data = to_vec(&filter).unwrap_or(Vec::new());
+        }
+        else {
+            filter_data = Vec::new();
+        }
+
         match self
             .client
-            .send_data_with_params(Vec::new(), service_name, params)
+            .send_data_with_params(filter_data, service_name, params)
             .await
         {
             Ok(response_data) => {
@@ -381,6 +413,7 @@ impl Peer {
             MAX_RETRIES,
         )
         .await?;
+    
         println!(
             "Requested resource '{}' with {} views from peer at {}",
             resource_name, num_views, peer_addr
@@ -481,72 +514,5 @@ impl Peer {
     
         Ok(())
     }
-    
-
-    // receive_resource(encrypted_img_path, output_dir) : receives an encrypted image from a peer and extract the hidden resource
-    // pub async fn receive_resource(
-    //     &self,
-    //     encrypted_img_path: &str, // Path to save the received encrypted image
-    //     output_dir: &str,         // Directory to store decrypted resources
-    // ) -> Result<(), Box<dyn std::error::Error>> {
-    //     // Receive the encrypted image as bytes
-    //     let mut buffer = [0u8; CHUNK_SIZE];
-    //     let (received_len, sender_addr) = recv_with_timeout(
-    //         &self.public_socket,
-    //         &mut buffer,
-    //         Duration::from_secs(DEFAULT_TIMEOUT),
-    //     )
-    //     .await?;
-    //     let encrypted_data = &buffer[..received_len];
-    //     println!("Received encrypted resource from {}.", sender_addr);
-    
-    //     // Save the encrypted image to the specified path
-    //     let mut encrypted_file = tokio::fs::File::create(encrypted_img_path).await?;
-    //     encrypted_file.write_all(encrypted_data).await?;
-    //     println!("Saved encrypted image to '{}'.", encrypted_img_path);
-    
-    //     // Decrypt the image to extract the hidden data
-    //     let extracted_data_path = format!("{}/extracted_data.txt", output_dir); // Temporary storage for extracted data
-    //     server_decrypt_img(encrypted_img_path, &extracted_data_path).await?;
-    
-    //     // Read and parse the extracted data
-    //     let mut extracted_file = tokio::fs::File::open(&extracted_data_path).await?;
-    //     let mut extracted_content = String::new();
-    //     extracted_file.read_to_string(&mut extracted_content).await?;
-    
-    //     // Split the extracted data into metadata and resource content
-    //     let parts: Vec<&str> = extracted_content.splitn(2, '|').collect();
-    //     if parts.len() != 2 {
-    //         eprintln!("Malformed extracted data: {}", extracted_content);
-    //         return Err("Malformed extracted data".into());
-    //     }
-    //     let metadata_str = parts[0];
-    //     let resource_content_base64 = parts[1];
-    
-    //     // Parse metadata
-    //     let metadata: serde_json::Value = serde_json::from_str(metadata_str)?;
-    //     let provider = metadata["provider"].as_str()
-    //         .ok_or("Invalid 'resource_name' value")?;
-    //     let num_views = metadata["num_views"].as_u64().ok_or("Invalid 'num_views' value")?;
-    //     let resource_name = metadata["resource_name"]
-    //         .as_str()
-    //         .ok_or("Invalid 'resource_name' value")?;
-    //     println!(
-    //         "Extracted metadata - Resource: '{}', Allowed Views: {}",
-    //         resource_name, num_views
-    //     );
-    
-    //     // Decode the resource content from Base64
-    //     let resource_content = base64::decode(resource_content_base64)?;
-    
-    //     // Save the resource content to a file
-    //     let resource_path = format!("{}/{}", output_dir, resource_name);
-    //     let mut resource_file = tokio::fs::File::create(&resource_path).await?;
-    //     resource_file.write_all(&resource_content).await?;
-    //     println!("Saved resource '{}' to '{}'.", resource_name, resource_path);
-    
-    //     Ok(())
-    // }
-    
 
 }

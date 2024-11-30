@@ -4,6 +4,8 @@
 
 use std::io::{self, Write};
 use std::collections::HashMap;
+use distri::peer::Peer;
+
 
 fn clear_screen() {
     print!("\x1B[2J\x1B[H"); // ANSI escape codes to clear the screen and move the cursor to the top-left corner
@@ -53,7 +55,8 @@ fn render_ui(
     println!("\nEnter your choice:");
 }
 
-fn main() {
+pub async fn run_program(peer:&Peer) {
+    // peer is passed
     let directory_of_service = vec![
         ("User A", vec!["image1", "image2"]),
         ("User B", vec!["image3"]),
