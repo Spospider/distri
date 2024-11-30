@@ -11,6 +11,12 @@ use std::io;
 use std::collections::HashMap;
 use regex::Regex;
 
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
+use pixels::{Pixels, SurfaceTexture};
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
@@ -60,6 +66,35 @@ pub async fn server_decrypt_img(base_img_path: &str, output_hidden_img_path: &st
     output_file.write_all(&decoded_img_bytes).await.expect("Failed to write decoded image");
     Ok(())
 }
+
+// peer decrypt: gets raw data of an encrypted image extracts the hidden image and returns it as bytes following the logic of read_from_img but using the raw image istead of the image path
+pub async fn peer_decrypt_img(encoded_img: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error + 'static>> {
+    /* let decoder = Decoder::new(encoded_image);
+    let out_buffer = decoder.decode_alpha();
+    let clean_buffer: Vec<u8> = out_buffer.into_iter()
+                                    .filter(|b| {
+                                        *b != 0xff_u8
+                                    })
+                                    .collect();
+    let message = bytes_to_str(clean_buffer.as_slice());
+    // println!("{:?}", message);
+    message.to_string() */
+    
+    // Extract the hidden message (base64-encoded image)
+    let encoded_message = bytes_to_str(encoded_img.as_slice());
+    // print!("encoded_message: {}", encoded_message);
+    // Decode the base64-encoded message back to image bytes
+    let decoded_img_bytes = match base64::decode(&encoded_message) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("Failed to decode base64: {}", e);
+            return Err(Box::new(e));  // use a simple error here
+        }
+    };
+    Ok(decoded_img_bytes)
+}
+
+
 
 async fn write_to_img(message: &str, img_path: &str, output_path: &str) {
     let binding = message.to_string();
@@ -296,3 +331,44 @@ pub fn extract_variable(input: &str) -> Result<String, io::Error> {
     }
 }
 
+
+pub fn show_image(image_data: Vec<u8>) -> Result<(), Box<dyn Error>> {
+    // Decode the image data
+    let img = image::load_from_memory(&image_data)?;
+    let img = img.to_rgba8(); // Convert to RGBA format
+    let (width, height) = img.dimensions();
+
+    // Create a window
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("Image Viewer")
+        .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+        .build(&event_loop)?;
+
+    // Create a pixels surface
+    let surface_texture = SurfaceTexture::new(width, height, &window);
+    let mut pixels = Pixels::new(width, height, surface_texture)?;
+
+    // Copy the image data into the pixel buffer
+    let frame = pixels.frame_mut();
+    frame.copy_from_slice(&img.into_raw());
+
+
+    // Run the event loop
+    event_loop.run(move |event, _, control_flow| {
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit, // Close the window
+            Event::RedrawRequested(_) => {
+                if pixels.render().is_err() {
+                    eprintln!("Failed to render image");
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            _ => (),
+        }
+        window.request_redraw();
+    });
+}

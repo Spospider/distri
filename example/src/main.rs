@@ -18,7 +18,7 @@ mod utils;
 use utils::{decrypt_image, write_to_file};
 
 mod app;
-use app::{run_program};
+use app::run_program;
 
 
 #[derive(Parser, Debug)]
@@ -26,7 +26,7 @@ struct Arguments {
     #[arg(short, long)]
     mode: String,
     #[arg(long)]
-    identifier: Option<u32>,
+    identifier: Option<String>,
     #[arg(long, action = clap::ArgAction::SetTrue)]
     report: bool,
     #[arg(long, value_delimiter = ',')]
@@ -60,7 +60,7 @@ async fn main() {
             }
 
             // define DB tables for directory of service
-            let table_names = Some(vec!["catalog", "permissions"]);
+            let table_names = Some(vec!["catalog", "permissions", "users"]);
 
             // Create and start the server
             let server = CloudNode::new(4, own_addr, Some(node_map), 1024, table_names).await.unwrap();
@@ -182,7 +182,7 @@ async fn main() {
         }
         "peer" => {
             // Server Mode
-            // let identifier = args.identifier.unwrap_or(10);
+            let identifier = args.identifier.expect("No identifier was specified, use the --identifier arg.");
 
             // Initialize server and other nodes in the network
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
@@ -193,7 +193,7 @@ async fn main() {
             }
 
             // Create and start the server
-            let peer = Peer::new(own_addr, Some(node_map)).await.unwrap();
+            let peer = Peer::new(&identifier.as_str(), own_addr, Some(node_map)).await.unwrap();
             run_program(&peer).await;
             
         }
@@ -209,6 +209,6 @@ async fn main() {
 
 // cargo run -- --mode client --report --ips 127.0.0.1:3000,127.0.0.1:3001
 
-// cargo run -- --mode peer --ips 127.0.0.1:2000,127.0.0.1:3000,127.0.0.1:3001
+// cargo run -- --mode peer --identifier ali --ips 127.0.0.1:2000,127.0.0.1:3000,127.0.0.1:3001
 // the first address is the peer's public address
 
