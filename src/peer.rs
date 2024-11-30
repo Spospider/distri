@@ -628,9 +628,10 @@ impl Peer {
             };
 
             // Encode access info
-            let encoded: String = format!("{:?}.{}", myself.public_socket.local_addr().unwrap(), num_views);
+            let encoded: String = format!("{:?};{}", myself.id, num_views);
             // Pad to the maximum length, accomodating for possibly ipv6 addresses
             let padded = format!("{:<width$}", encoded, width=62);
+            // TODOhow to reverse this to get id and num_views back from padded string
 
             // Add padded to data at the end
             encrypted_data.extend_from_slice(padded.as_bytes());
