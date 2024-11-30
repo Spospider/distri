@@ -457,7 +457,13 @@ impl Peer {
             let params = vec!["permissions"];
             let _ =  myself.client.send_data_with_params(entry.as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
 
-            // send grant message back to peer to exchange data 
+            // pop from local inbox, based on user and resource_name
+            let mut inbox = myself.inbox_queue.lock().await;
+            inbox.retain(|item| {
+                !(peer_addr.to_string().as_str() == item["user"].as_str().unwrap_or("") && item["resource"].as_str() == Some(&resource_n))
+            });
+
+            // send grant message  to peer to exchange data 
             let _ = match send_with_retry(&socket, entry.as_bytes(), peer_addr, MAX_RETRIES).await {
                 Ok(()) => (), // Successfully received data
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
@@ -505,11 +511,7 @@ impl Peer {
             }).to_string();
             let _ =  myself.client.send_data_with_params(filter.as_bytes().to_vec(), "DeleteDocument", params.clone()).await.unwrap();
             
-            // pop from local inbox, based on user and resource_name
-            let mut inbox = myself.inbox_queue.lock().await;
-            inbox.retain(|item| {
-                !(addr.to_string().as_str() == item["user"].as_str().unwrap_or("") && item["resource"].as_str() == Some(&resource_n))
-            });
+            
         });
     
         Ok(())
