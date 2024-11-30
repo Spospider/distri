@@ -154,15 +154,15 @@ pub async fn run_program(peer:&Arc<Peer>) {
     
         // received requests -> requests I yet have to accept
         // let mut received_requests = vec![("User B".to_string(), "image1", 5)];
-        let inbox_queue = peer.inbox_queue.lock().await.clone();
+        let inbox_queue = peer.inbox_queue().await.clone();
         let mut received_requests = parse_requests_or_grants(inbox_queue, "request");
     
         let mut pending_requests = vec![("User C".to_string(), "image4".to_string(), 3)];
-        let pend_requests = peer.pending_approval.lock().await.clone();
+        let pend_requests = peer.pending_approval().await.clone();
         pending_requests = parse_requests_or_grants(pend_requests, "request");
         println!{"pending approval: {:?}", pending_requests};
         // Fetch granted access
-        let grants = peer.available_resources.lock().await.clone();
+        let grants = peer.available_resources().await.clone();
         let granted_vec = parse_requests_or_grants(grants, "grant");
         
         // Convert to HashMap

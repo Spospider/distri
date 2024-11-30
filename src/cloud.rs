@@ -799,7 +799,8 @@ impl CloudNode {
                         // Find the entry to update
                         if let Some(existing_entry) = table.iter_mut().find(|doc| {
                             if let Value::Object(ref obj) = doc {
-                                obj.get("UUID") == Some(&Value::String(id.clone()))
+                                println!("Comparing uuids {:?} == {:?}", obj.get("UUID").unwrap().as_str().unwrap_or("NULL") , id.clone().as_str());
+                                obj.get("UUID").unwrap().as_str().unwrap_or("NULL") == id.clone().as_str()
                             } else {
                                 false
                             }
@@ -921,6 +922,7 @@ impl CloudNode {
                         // update data version with any change in DB
                         *self.db_data_version.lock().await += 1;
                         println!("Deleted Docs matching: {}", entry);
+                        println!("Docs: {:?}", collections.get_mut(table_name));
 
                         // reply to sender
                         let response = "Docs deleted successfully.".to_string();

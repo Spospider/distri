@@ -24,9 +24,9 @@ pub struct Peer {
     client:Client, //we should use a client object here for as the cloud communication middleware.
     
     // lists of mem operations 
-    pub pending_approval: Arc<Mutex<Vec<Value>>>,
-    pub inbox_queue: Arc<Mutex<Vec<Value>>>,
-    pub available_resources: Arc<Mutex<Vec<Value>>>,
+    // pub pending_approval: Arc<Mutex<Vec<Value>>>,
+    // pub inbox_queue: Arc<Mutex<Vec<Value>>>,
+    // pub available_resources: Arc<Mutex<Vec<Value>>>,
 }
 
 
@@ -68,9 +68,9 @@ impl Peer {
             // client:Arc::new(client),
             client,
 
-            pending_approval: Arc::new(Mutex::new(Vec::new())),
-            inbox_queue: Arc::new(Mutex::new(Vec::new())),
-            available_resources: Arc::new(Mutex::new(Vec::new())),
+            // pending_approval: Arc::new(Mutex::new(Vec::new())),
+            // inbox_queue: Arc::new(Mutex::new(Vec::new())),
+            // available_resources: Arc::new(Mutex::new(Vec::new())),
         });
 
         Ok(peer)
@@ -86,30 +86,26 @@ impl Peer {
         self.publish_info().await?;
         
         // Get up to date with the cloud
-        let filter = json!({
-            "type" : "request",
-            "provider" : *self.id.clone(),
-        });
-        let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
+        // let filter = json!({
+        //     "type" : "request",
+        //     "provider" : *self.id.clone(),
+        // });
+        // let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
         // Update `inbox_queue`
-        let mut inbox: tokio::sync::MutexGuard<'_, Vec<Value>> = self.inbox_queue.lock().await;
-        for item in &cloud_transactions {
-            // check if types is request, and i am the provider
-            // if item["type"].as_str() == Some("request") && item["provider"].as_str() == Some(format!("{:?}",self.public_socket.local_addr()).as_str()) {
-                if let Some(user) = item["user"].as_str() {
-                    let mut data = item.clone();
-                    data["user"] = Value::String(user.to_string());
-                    inbox.push(data);
-                }
-            // }
-        }
+        // let mut inbox: tokio::sync::MutexGuard<'_, Vec<Value>> = self.inbox_queue.lock().await;
+        // for item in &cloud_transactions {
+        //     // check if types is request, and i am the provider
+        //     // if item["type"].as_str() == Some("request") && item["provider"].as_str() == Some(format!("{:?}",self.public_socket.local_addr()).as_str()) {
+        //         if let Some(user) = item["user"].as_str() {
+        //             let mut data = item.clone();
+        //             data["user"] = Value::String(user.to_string());
+        //             inbox.push(data);
+        //         }
+        //     // }
+        // }
 
         // Get up to date with the cloud
-        let filter: Value = json!({
-            "type" : "grant",
-            "user" : *self.id.clone(),
-        });
-        let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
+        let cloud_transactions =  self.available_resources().await;
         
         // Check missed grants, and resend request for them
         for item in &cloud_transactions {
@@ -118,10 +114,17 @@ impl Peer {
                 if let Some(peer_id) = item["provider"].as_str() {
                     if let Some(resource_name) = item["resource"].as_str() {
                         if let Some(num_views) = item["num_views"].as_u64() {
-                            // request it from peer again
-                            // check if 
-                            self.request_resource(peer_id, resource_name, num_views as u32).await.unwrap_or_default();
-                            // peer should then send a grant resource
+                            
+                            //  check if "resource_name.encrp" file exists or not in resources/borrowed
+                            let resource_path = format!("resources/borrowed/{}.encrp", resource_name);
+                            let path = Path::new(&resource_path);
+                
+                            // Check if the file exists in the resources/borrowed directory
+                            if !path.exists() {
+                                // request it from peer again
+                                self.request_resource(peer_id, resource_name, num_views as u32).await.unwrap_or_default();
+                                // peer should then send a grant resource
+                            }
                         }
                     }
                 }
@@ -136,10 +139,10 @@ impl Peer {
         let serve_self = self.clone();
         tokio::spawn(async move {
             loop {
-                // println!("looping");
-                println!("pending_approval: {:?}", serve_self.pending_approval.lock().await);
-                println!("inbox_queue: {:?}", serve_self.inbox_queue.lock().await);
-                println!("available_resources: {:?}", serve_self.available_resources.lock().await);
+                println!("looping");
+                println!("pending_approval: {:?}", serve_self.pending_approval().await);
+                println!("inbox_queue: {:?}", serve_self.inbox_queue().await);
+                println!("available_resources: {:?}", serve_self.available_resources().await);
                 let mut buffer: Vec<u8> = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
                 let (size, addr) = match recv_with_timeout(&serve_self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                     Ok((size, addr)) => (size, addr), // Successfully received data
@@ -196,13 +199,13 @@ impl Peer {
 
 
         // if not then add to inbox
-        let mut inbox = self.inbox_queue.lock().await;
-        inbox.push(data);
+        // let mut inbox = self.inbox_queue.lock().await;
+        // inbox.push(data);
     }
 
     async fn handle_grant_msg(&self, addr:SocketAddr, json_obj:Value) {
-        let mut pending = self.pending_approval.lock().await;
-        // println!("in handle_grant_msg");
+        let mut pending = self.pending_approval().await;
+        println!("in handle_grant_msg");
 
         // Collect the items that match the condition into a separate vector
         let r_name = json_obj["resource"].clone();
@@ -255,13 +258,13 @@ impl Peer {
             println!("Saved received resource '{}' as '{}'.", og_filename, output_path);
 
             // Update local resources list
-            let mut resources = self.available_resources.lock().await;
-            resources.push(json_obj);
+            // let mut resources = self.available_resources.lock().await;
+            // resources.push(json_obj);
         }
         // Pop from pending
-        pending.retain(|item| {
-            !(peer_id == item["provider"].as_str().unwrap_or("") && item["resource"].as_str() == r_name.as_str())
-        });
+        // pending.retain(|item| {
+        //     !(peer_id == item["provider"].as_str().unwrap_or("") && item["resource"].as_str() == r_name.as_str())
+        // });
     }
 
     async fn encrypt_img(&self, file_name:&str, num_views:u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -322,20 +325,20 @@ impl Peer {
         {
             Ok(response_data) => {
                 let response_message = String::from_utf8_lossy(&response_data);
-                println!("Received response: {}", response_message);
+                // println!("Received response: {}", response_message);
     
                 // Parse the JSON response
                 let json_data: Vec<Value> = serde_json::from_str(&response_message)?;
-                println!(
-                    "Parsed collection data for '{}':\n{}",
-                    collection_name,
-                    serde_json::to_string_pretty(&json_data)?
-                );
+                // println!(
+                //     "Parsed collection data for '{}':\n{}",
+                //     collection_name,
+                //     serde_json::to_string_pretty(&json_data)?
+                // );
     
                 // Save the collection locally
                 let mut collections = self.collections.lock().await;
                 collections.insert(collection_name.to_string(), json_data.clone());
-                println!("Saved collection '{}' locally.", collection_name);
+                // println!("Saved collection '{}' locally.", collection_name);
     
                 Ok(json_data)
             }
@@ -492,8 +495,8 @@ impl Peer {
         .await?;
 
         // add to pending
-        let mut pending = self.pending_approval.lock().await;
-        pending.push(request_message);
+        // let mut pending = self.pending_approval.lock().await;
+        // pending.push(request_message);
         
         println!(
             "Requested resource '{}' with {} views from peer {}",
@@ -569,11 +572,11 @@ impl Peer {
             }
 
             // pop from local inbox, based on user and resource_name
-            let mut inbox = myself.inbox_queue.lock().await;
-            inbox.retain(|item| {
-                !(peer_id_ == item["user"].as_str().unwrap_or("") && item["resource"].as_str() == Some(&resource_n))
-            });
-            // println!("grant_resource4");
+            // let mut inbox = myself.inbox_queue.lock().await;
+            // inbox.retain(|item| {
+            //     !(peer_id_ == item["user"].as_str().unwrap_or("") && item["resource"].as_str() == Some(&resource_n))
+            // });
+            println!("grant_resource4");
 
             // send grant message  to peer to exchange data 
             println!("sending grant resource to {}", myself.resolve_id(peer_id_.as_str()).await.unwrap());
@@ -640,15 +643,101 @@ impl Peer {
 
             // Only if everything is successful:
             // delete original request from DOS directory of services
+            // let filter = json!({
+            //     "UUID": format!("req:{:?}|{:?}|{}", myself.id, peer_id_, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
+            // }).to_string();
             let filter = json!({
-                "UUID": format!("req:{:?}|{:?}|{}", myself.id, peer_id_, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
+                "type" : "request",
+                "user" : peer_id_,
+                "provider" : *myself.id.clone(),
+                "resource" : resource_n,
             }).to_string();
+            println!("deleting UUID: {}", format!("req:{:?}|{:?}|{}", myself.id, peer_id_, resource_n));
             let _ =  myself.client.send_data_with_params(filter.as_bytes().to_vec(), "DeleteDocument", params.clone()).await.unwrap();
             
             
         // });
     
         Ok(())
+    }
+
+    pub async fn pending_approval(&self) -> Vec<Value>{
+        let filter = json!({
+            "type" : "request",
+            "user" : *self.id.clone(),
+        });
+ 
+        let transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
+
+        // let mut filtered_transactions = vec![];
+
+        // for transaction in &transactions {
+        //     // Extract user field from the transaction
+        //     let user = transaction["user"].as_str().unwrap_or("NULL");
+
+        //     let filter2 = json!({
+        //         "type": "grant",
+        //         "provider": user,
+        //         "user": *self.id.clone(),
+        //     });
+
+        //     // Check if there are grants for this user
+        //     let grants = self
+        //         .fetch_collection("permissions", Some(filter2))
+        //         .await
+        //         .expect("Failed to fetch from 'permissions' collection");
+
+        //     // If no grants are found, keep the transaction
+        //     if grants.is_empty() {
+        //         filtered_transactions.push(transaction.clone());
+        //     }
+        // }
+        transactions
+    }
+
+    pub async fn inbox_queue(&self) -> Vec<Value>{
+        let filter = json!({
+            "type" : "request",
+            "provider" : *self.id.clone(),
+        });
+ 
+        let transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
+
+        // let mut filtered_transactions = vec![];
+
+        // for transaction in &transactions {
+        //     // Extract user field from the transaction
+        //     let user = transaction["user"].as_str().unwrap_or("NULL");
+
+        //     let filter2 = json!({
+        //         "type": "grant",
+        //         "provider": *self.id.clone(),
+        //         "user": user,
+        //     });
+
+        //     // Check if there are grants for this user
+        //     let grants = self
+        //         .fetch_collection("permissions", Some(filter2))
+        //         .await
+        //         .expect("Failed to fetch from 'permissions' collection");
+
+        //     // If no grants are found, keep the transaction
+        //     if grants.is_empty() {
+        //         filtered_transactions.push(transaction.clone());
+        //     }
+        // }
+        transactions
+    }
+    
+    pub async fn available_resources(&self) -> Vec<Value>{
+        let filter = json!({
+            "type" : "grant",
+            "user" : *self.id.clone(),
+        });
+ 
+        let transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
+
+        return transactions
     }
 
     // access_resource(resource_name, provider_addr)
@@ -708,7 +797,7 @@ impl Peer {
                 "resource": resource_name,
                 "num_views": num_views,
                 "remaining": num_views,
-                "UUID": format!("req:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+                "UUID": format!("grant:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
             });
             
             let params = vec!["permissions"];
@@ -737,7 +826,7 @@ impl Peer {
             "resource": resource_name,
             "num_views": num_views - 1,
             "remaining": num_views - 1,
-            "UUID": format!("req:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+            "UUID": format!("grant:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
         });
         let params = vec!["permissions"];
         let _ =  self.client.send_data_with_params(entry.to_string().as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
