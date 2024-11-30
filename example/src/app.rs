@@ -7,6 +7,80 @@ use std::collections::HashMap;
 use distri::peer::Peer;
 use std::sync::Arc;
 
+use serde_json::Value;
+
+fn parse_directory_of_service(directory: Vec<Value>) -> Vec<(String, Vec<String>)> {
+    let mut result = Vec::new();
+
+    for entry in directory {
+        if let Value::Object(map) = entry {
+            // Extract the `peer_addr` field
+            if let Some(Value::String(peer_addr)) = map.get("peer_addr") {
+                // Extract the `resources` field
+                if let Some(Value::Array(resources_array)) = map.get("resources") {
+                    let mut images = Vec::new();
+
+                    // Collect all filenames from the `resources` array
+                    for resource in resources_array {
+                        if let Value::Object(resource_map) = resource {
+                            if let Some(Value::String(filename)) = resource_map.get("filename") {
+                                images.push(filename.clone());
+                            }
+                        }
+                    }
+
+                    // Add the entry to the result
+                    result.push((peer_addr.clone(), images));
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Parses a list of requests or grants and returns a vector with the desired format.
+/// 
+/// # Arguments
+/// * `entries` - A vector of `serde_json::Value` objects representing requests or grants.
+/// * `entry_type` - A string slice indicating whether to parse "request" or "grant".
+///
+/// # Returns
+/// A vector in the format `Vec<(String, String, usize)>`, where:
+/// - The first element is either the `user` (for "request") or `provider` (for "grant").
+/// - The second element is the `resource_name`.
+/// - The third element is the `num_views`.
+fn parse_requests_or_grants(entries: Vec<Value>, entry_type: &str) -> Vec<(String, String, usize)> {
+    let mut result = Vec::new();
+
+    for entry in entries {
+        if let Value::Object(map) = entry {
+            // Extract fields
+            let key_field = match entry_type {
+                "request" => "user",
+                "grant" => "provider",
+                _ => continue, // Ignore unknown entry types
+            };
+
+            if let Some(Value::String(key_value)) = map.get(key_field) {
+                if let Some(Value::String(resource_name)) = map.get("resource_name") {
+                    if let Some(Value::Number(num_views)) = map.get("num_views") {
+                        if let Some(num_views) = num_views.as_u64() {
+                            // Add to result vector
+                            result.push((
+                                key_value.clone(),
+                                resource_name.clone(),
+                                num_views as usize,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
 
 fn clear_screen() {
     print!("\x1B[2J\x1B[H"); // ANSI escape codes to clear the screen and move the cursor to the top-left corner
@@ -14,7 +88,7 @@ fn clear_screen() {
 }
 
 fn render_ui(
-    directory_of_service: &Vec<(&str, Vec<&str>)>,
+    directory_of_service: &Vec<(String, Vec<String>)>,
     received_requests: &Vec<(&str, &str, usize)>,
     pending_requests: &Vec<(String, String, usize)>,
     granted_access: &HashMap<(String, String), usize>,
@@ -58,16 +132,24 @@ fn render_ui(
 
 pub async fn run_program(peer:&Arc<Peer>) {
     // peer is passed
-    peer.start().await.unwrap();
-    let directory_of_service = vec![
-        ("User A", vec!["image1", "image2"]),
-        ("User B", vec!["image3"]),
-    ];
+    peer.start().await;
+    let directory = peer.fetch_collection("catalog", None).await.unwrap_or_default();
+    
+    // let directory_of_service = vec![
+    //     ("User A", vec!["image1", "image2"]),
+    //     ("User B", vec!["image3"]),
+    // ];
+
+    let directory_of_service = parse_directory_of_service(directory);
 
     let mut received_requests = vec![("User B", "image1", 5)];
     let mut pending_requests = vec![("User C".to_string(), "image4".to_string(), 3)];
+    let pend_requests = peer.pending_approval.lock().await.clone();
+    pending_requests = parse_requests_or_grants(pend_requests, "request");
+    println!{"pending approval: {:?}", pending_requests};
     let mut granted_access: HashMap<(String, String), usize> = HashMap::new();
     granted_access.insert(("User B".to_string(), "image1".to_string()), 3);
+    
 
     loop {
         render_ui(

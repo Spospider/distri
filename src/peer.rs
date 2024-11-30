@@ -248,10 +248,10 @@ impl Peer {
     }
 
     async fn encrypt_img(&self, file_name:&str, num_views:u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let file_path: PathBuf = Path::new("resources/owned").join(file_name);
-
+        // let file_path: PathBuf = Path::new("./resources/owned").join(file_name);
+        // println!("file_path: {:?}", file_path);
         // Read the file data to be sent
-        let mut file = File::open(file_path).await.unwrap();
+        let mut file = File::open(file_name).await.unwrap();
         let mut data = Vec::new();
         file.read_to_end(&mut data).await.unwrap();
 
@@ -281,7 +281,7 @@ impl Peer {
     }
     
     // fetch_collection(): fetches any collection from the cloud, returns the json.
-    async fn fetch_collection(
+    pub async fn fetch_collection(
         &self,
         collection_name: &str,
         filter: Option<Value>,
@@ -351,17 +351,31 @@ impl Peer {
             };
             // save encrypted_data in file as filename .encrp in resources/encrypted
             // Write the encrypted data to the file
-            let output_path = std::path::Path::new("resources/encrypted").join(format!("{}.encrp", file_name));
-            match std::fs::write(&output_path, encrypted_data) {
+            let output_dir = std::path::Path::new("resources/encrypted");
+            let output_path = output_dir.join(format!("{}.encrp", file_name));
+            
+            // Ensure the directory exists
+            if !output_dir.exists() {
+                match fs::create_dir_all(&output_dir).await {
+                    Ok(_) => println!("Created directory: {:?}", output_dir),
+                    Err(e) => {
+                        eprintln!("Failed to create directory {:?}: {}", output_dir, e);
+                        continue; // Skip the current iteration if the directory cannot be created
+                    }
+                }
+            }
+            
+            // Write the file
+            match fs::write(&output_path, encrypted_data).await {
                 Ok(_) => {
                     println!("Encrypted data saved to {:?}", output_path);
                 }
                 Err(e) => {
                     eprintln!("Failed to save encrypted data to file: {}", e);
-                    continue;
+                    continue; // Skip the current iteration if the file cannot be written
                 }
             }
-    
+                            
             // Collect metadata
             if let Ok(metadata) = entry.metadata().await {
                 let file_size = metadata.len();
