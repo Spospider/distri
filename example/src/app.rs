@@ -15,7 +15,7 @@ fn parse_directory_of_service(directory: Vec<Value>) -> Vec<(String, Vec<String>
     for entry in directory {
         if let Value::Object(map) = entry {
             // Extract the `peer_addr` field
-            if let Some(Value::String(peer_addr)) = map.get("peer_addr") {
+            if let Some(Value::String(id)) = map.get("id") {
                 // Extract the `resources` field
                 if let Some(Value::Array(resources_array)) = map.get("resources") {
                     let mut images = Vec::new();
@@ -30,7 +30,7 @@ fn parse_directory_of_service(directory: Vec<Value>) -> Vec<(String, Vec<String>
                     }
 
                     // Add the entry to the result
-                    result.push((peer_addr.clone(), images));
+                    result.push((id.clone(), images));
                 }
             }
         }
@@ -89,7 +89,7 @@ fn clear_screen() {
 
 fn render_ui(
     directory_of_service: &Vec<(String, Vec<String>)>,
-    received_requests: &Vec<(&str, &str, usize)>,
+    received_requests: &Vec<(String, String, usize)>,
     pending_requests: &Vec<(String, String, usize)>,
     granted_access: &HashMap<(String, String), usize>,
 ) {
@@ -133,25 +133,40 @@ fn render_ui(
 pub async fn run_program(peer:&Arc<Peer>) {
     // peer is passed
     peer.start().await;
-    let directory = peer.fetch_collection("catalog", None).await.unwrap_or_default();
     
-    // let directory_of_service = vec![
-    //     ("User A", vec!["image1", "image2"]),
-    //     ("User B", vec!["image3"]),
-    // ];
-
-    let directory_of_service = parse_directory_of_service(directory);
-
-    let mut received_requests = vec![("User B", "image1", 5)];
-    let mut pending_requests = vec![("User C".to_string(), "image4".to_string(), 3)];
-    let pend_requests = peer.pending_approval.lock().await.clone();
-    pending_requests = parse_requests_or_grants(pend_requests, "request");
-    println!{"pending approval: {:?}", pending_requests};
-    let mut granted_access: HashMap<(String, String), usize> = HashMap::new();
-    granted_access.insert(("User B".to_string(), "image1".to_string()), 3);
+    // let mut granted_access: HashMap<(String, String), usize> = HashMap::new();
+    // granted_access.insert(("User B".to_string(), "image1".to_string()), 3);
     
 
     loop {
+        let directory = peer.fetch_collection("catalog", None).await.unwrap_or_default();
+    
+        // let directory_of_service = vec![
+        //     ("User A", vec!["image1", "image2"]),
+        //     ("User B", vec!["image3"]),
+        // ];
+    
+        let directory_of_service = parse_directory_of_service(directory);
+    
+        // received requests -> requests I yet have to accept
+        // let mut received_requests = vec![("User B".to_string(), "image1", 5)];
+        let inbox_queue = peer.inbox_queue.lock().await.clone();
+        let mut received_requests = parse_requests_or_grants(inbox_queue, "request");
+    
+        let mut pending_requests = vec![("User C".to_string(), "image4".to_string(), 3)];
+        let pend_requests = peer.pending_approval.lock().await.clone();
+        pending_requests = parse_requests_or_grants(pend_requests, "request");
+        println!{"pending approval: {:?}", pending_requests};
+        // Fetch granted access
+        let grants = peer.available_resources.lock().await.clone();
+        let granted_vec = parse_requests_or_grants(grants, "grant");
+        
+        // Convert to HashMap
+        let mut granted_access: HashMap<(String, String), usize> = granted_vec
+            .into_iter()
+            .map(|(provider, resource_name, num_views)| ((provider, resource_name), num_views))
+            .collect();
+    
         render_ui(
             &directory_of_service,
             &received_requests,
@@ -168,7 +183,7 @@ pub async fn run_program(peer:&Arc<Peer>) {
             "1" => {
                 // Refresh view
                 println!("Refreshing view...");
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                // std::thread::sleep(std::time::Duration::from_secs(1));
             }
             "2" => {
                 // Request image
@@ -185,9 +200,10 @@ pub async fn run_program(peer:&Arc<Peer>) {
                 println!("Enter the number of views needed:");
                 let mut views = String::new();
                 io::stdin().read_line(&mut views).unwrap();
-                let views = views.trim().parse::<usize>().unwrap_or(0);
+                let views = views.trim().parse::<u32>().unwrap_or(0);
 
-                pending_requests.push((username, image_name, views));
+                // pending_requests.push((username, image_name, views));
+                peer.request_resource(username.as_str(), image_name.as_str(), views).await;
                 println!("Request sent.");
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
@@ -209,7 +225,7 @@ pub async fn run_program(peer:&Arc<Peer>) {
 
                 if let Ok(index) = request_choice.trim().parse::<usize>() {
                     if index > 0 && index <= received_requests.len() {
-                        let (from_user, image, views) = received_requests[index - 1];
+                        let (from_user, image, views) = &received_requests[index - 1];
                         println!(
                             "Accept, Reject, or Accept with Updated Views? (a/r/u):"
                         );
@@ -219,10 +235,12 @@ pub async fn run_program(peer:&Arc<Peer>) {
 
                         match decision.trim() {
                             "a" => {
-                                granted_access.insert((from_user.to_string(), image.to_string()), views);
+                                peer.grant_resource(from_user, image, views);
+                                // granted_access.insert((from_user.to_string(), image.to_string()), *views);
                                 println!("Accepted request!");
                             }
                             "r" => {
+                                peer.grant_resource(from_user, image, 0);
                                 println!("Rejected request!");
                             }
                             "u" => {
@@ -230,6 +248,7 @@ pub async fn run_program(peer:&Arc<Peer>) {
                                 let mut updated_views = String::new();
                                 io::stdin().read_line(&mut updated_views).unwrap();
                                 if let Ok(new_views) = updated_views.trim().parse::<usize>() {
+                                    peer.grant_resource(from_user, image, updated_views);
                                     // granted_access.insert((from_user.to_string(), image.to_string()), new_views);
                                     println!(
                                         "Accepted request with updated views: {}",

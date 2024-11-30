@@ -338,7 +338,11 @@ impl Peer {
         let params = vec!["users"];
         let result = self.client.send_data_with_params(payload.as_bytes().to_vec(), "ReadCollection", params.clone())
         .await.expect("Failed to resolve name from DOS.");
-        let data:Vec<Value> = serde_json::from_slice(&result).expect("failed to parse json resolved");
+        match String::from_utf8(result.clone()) {
+            Ok(result_str) => println!("{}", result_str),
+            Err(e) => eprintln!("Failed to convert result to string: {}", e),
+        }
+        let data:Vec<Value> = serde_json::from_slice(&result.clone()).expect("failed to parse json resolved");
         // check if data has a first entry, if so, 
         // let address = take data[0]["addr"]
         if let Some(first_entry) = data.get(0) {
