@@ -492,7 +492,7 @@ impl Peer {
         num_views: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         
-        let resource_path = format!("./resources/{}", resource_name);
+        let resource_path = format!("./resources/encrypted/{}.encrp", resource_name);
     
         // Check if the resource exists
         if !tokio::fs::metadata(&resource_path).await.is_ok() {
