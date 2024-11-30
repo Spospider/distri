@@ -753,6 +753,8 @@ impl Peer {
                 resource_n, num_views, peer_id_
             );
 
+            // 
+
             // Only if everything is successful:
             // delete original request from DOS directory of services
             let filter = json!({
@@ -972,6 +974,44 @@ impl Peer {
             eprintln!("No views remaining for resource '{}'.", resource_name);
             // return Err("No views remaining".into());
         }
+
+        let file_path = std::path::Path::new("resources/encrypted").join(format!("{}.encrp", resource_name));
+            // Read the encrypted data from the file
+            let mut encrypted_data: Vec<u8> = match std::fs::read(&file_path) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("Failed to read encrypted data from file {}: {}", file_path.display(), e);
+                    Vec::new() // Return an empty vector on error
+                }
+            };
+
+            // Encode access info
+            let encoded: String = format!("{:?};{}", self.id, num_views);
+            // Pad to the maximum length, accomodating for possibly ipv6 addresses
+            let padded = format!("{:<width$}", encoded, width=62);
+
+            // Add padded to data at the end
+            encrypted_data.extend_from_slice(padded.as_bytes());
+
+            // save the image to resources/borrowed
+            let output_dir = std::path::Path::new("resources/borrowed");
+            let output_path = output_dir.join(format!("{}.encrp", resource_name));
+            // let mut output_file = File::create(output_path);
+            
+            if let Err(e) = async {
+                let mut file = tokio::fs::File::create(&output_path).await?;
+                file.write_all(&encrypted_data).await?;
+                Ok::<(), std::io::Error>(())
+            }
+            .await
+            {
+                eprintln!("Failed to save received file");
+            }
+            println!("Saved received resource");
+            // output_file.write_all(&encrypted_data);
+
+
+            
         // Return the decrypted image data
         Ok(decrypted_data)
 
