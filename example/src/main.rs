@@ -194,7 +194,7 @@ async fn main() {
 
             // Create and start the server
             let peer = Peer::new(own_addr, Some(node_map)).await.unwrap();
-            run_program(&Arc::new(peer)).await;
+            run_program(&peer).await;
             
         }
         _ => {

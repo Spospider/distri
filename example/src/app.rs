@@ -5,6 +5,7 @@
 use std::io::{self, Write};
 use std::collections::HashMap;
 use distri::peer::Peer;
+use std::sync::Arc;
 
 
 fn clear_screen() {
@@ -55,8 +56,9 @@ fn render_ui(
     println!("\nEnter your choice:");
 }
 
-pub async fn run_program(peer:&Peer) {
+pub async fn run_program(peer:&Arc<Peer>) {
     // peer is passed
+    peer.start().await.unwrap();
     let directory_of_service = vec![
         ("User A", vec!["image1", "image2"]),
         ("User B", vec!["image3"]),

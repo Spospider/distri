@@ -196,7 +196,7 @@ impl Client {
 
 
     async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) -> Result<Vec<u8>, std::io::Error>  {
-        println!("recieving on {:?}", socket.local_addr());
+        // println!("receiving on {:?}", socket.local_addr().unwrap());
         let (data, _, addr) = recv_reliable(&socket, None).await.unwrap(); // Adjust for proper error handling if necessary.
         if addr != sender {
             return Err(std::io::Error::new(

@@ -53,7 +53,7 @@ impl Peer {
         let socket = Arc::new(UdpSocket::bind(address).await?);
         
         // Initialize the client for cloud interaction
-        let mut client = Client::new(cloud_nodes, None);
+        let client = Client::new(cloud_nodes, None);
 
         // Initialize the peer instance
         let peer = Arc::new(Peer {
@@ -82,7 +82,7 @@ impl Peer {
         // Get up to date with the cloud
         let filter = json!({
             "type" : "request",
-            "provider" : format!("{:?}",self.public_socket.local_addr()).as_str(),
+            "provider" : format!("{:?}",self.public_socket.local_addr().unwrap()).as_str(),
         });
         let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
         // Update `inbox_queue`
@@ -101,7 +101,7 @@ impl Peer {
         // Get up to date with the cloud
         let filter = json!({
             "type" : "grant",
-            "user" : format!("{:?}",self.public_socket.local_addr()).as_str(),
+            "user" : format!("{:?}",self.public_socket.local_addr().unwrap()).as_str(),
         });
         let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
         
@@ -125,13 +125,12 @@ impl Peer {
 
 
         // Init socket
-        println!("Peer available on {:?}", self.public_socket.local_addr());
+        println!("Peer available on {:?}", self.public_socket.local_addr().unwrap());
 
         // init server thread
         let serve_self = self.clone();
         tokio::spawn(async move {
             loop {
-                println!("looping1");
                 let mut buffer: Vec<u8> = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
                 let (size, addr) = match recv_with_timeout(&serve_self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                     Ok((size, addr)) => (size, addr), // Successfully received data
@@ -171,7 +170,7 @@ impl Peer {
         let resource_name = data["resource_name"].as_str().unwrap_or("NULL");
         // check if request has been granted before from DOS, and grant automatically if so.
         let filter = json!({
-            "UUID": format!("grant:{:?}|{:?}|{}", self.public_socket.local_addr(), addr, resource_name),
+            "UUID": format!("grant:{:?}|{:?}|{}", self.public_socket.local_addr().unwrap(), addr, resource_name),
         });
         let cloud_transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch 'permissions' collection");
         for item in &cloud_transactions {
@@ -256,12 +255,13 @@ impl Peer {
         let mut data = Vec::new();
         file.read_to_end(&mut data).await.unwrap();
 
-        // Encode access info
-        let encoded = format!("{:?}.{}", self.public_socket.local_addr(), num_views);
-        // Pad to the maximum length, accomodating for possibly ipv6 addresses
-        let padded = format!("{:<width$}", encoded, width=62);
+        // // Encode access info
+        // let encoded: String = format!("{:?}.{}", self.public_socket.local_addr(), num_views);
+        // // Pad to the maximum length, accomodating for possibly ipv6 addresses
+        // let padded = format!("{:<width$}", encoded, width=62);
+
         // Add padded to data at the end
-        data.extend_from_slice(padded.as_bytes());
+        // data.extend_from_slice(padded.as_bytes());
 
         let result = self.client.send_data(data, "Encrypt").await;
         
@@ -280,7 +280,7 @@ impl Peer {
 
     }
     
-    // fetch_collection(): fetches any collection from the cloud, returns the json list.
+    // fetch_collection(): fetches any collection from the cloud, returns the json.
     async fn fetch_collection(
         &self,
         collection_name: &str,
@@ -334,7 +334,7 @@ impl Peer {
     pub async fn publish_info(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Define the folder to scan
         let folder_path = "resources/owned"; // Add folder path
-        let peer_addr = self.public_socket.local_addr();
+        let peer_addr = self.public_socket.local_addr().unwrap();
     
         // Read the folder contents asynchronously
         let mut resources_info = Vec::new();
@@ -342,6 +342,25 @@ impl Peer {
     
         while let Some(entry) = entries.next_entry().await? {
             let file_name = entry.file_name().into_string().unwrap_or_default();
+
+            let encrypted_data =  match self.encrypt_img(&entry.path().to_str().unwrap(), 0).await {
+                Ok(encrypted_data) => encrypted_data,
+                Err(_) => {
+                    continue;
+                }
+            };
+            // save encrypted_data in file as filename .encrp in resources/encrypted
+            // Write the encrypted data to the file
+            let output_path = std::path::Path::new("resources/encrypted").join(format!("{}.encrp", file_name));
+            match std::fs::write(&output_path, encrypted_data) {
+                Ok(_) => {
+                    println!("Encrypted data saved to {:?}", output_path);
+                }
+                Err(e) => {
+                    eprintln!("Failed to save encrypted data to file: {}", e);
+                    continue;
+                }
+            }
     
             // Collect metadata
             if let Ok(metadata) = entry.metadata().await {
@@ -367,21 +386,10 @@ impl Peer {
         println!("Prepared payload: {}", payload_str);
     
         let params = vec!["catalog"];
-        match self.client.send_data_with_params(payload_str.as_bytes().to_vec(), "UpdateDocument", params.clone())
-        .await{
-            Ok(response_data) => {
-                let response_message = String::from_utf8_lossy(&response_data);
-                if response_message != "OK" {
-                    return Err(format!("Server returned error: {}", response_message).into());
-                }
-                println!("Server acknowledged publish_info request.");
-                Ok(())
-            }
-            Err(e) => {
-                eprintln!("Error during publish_info: {}", e);
-                Err(Box::new(e))
-            }
-        }
+        self.client.send_data_with_params(payload_str.as_bytes().to_vec(), "UpdateDocument", params.clone())
+        .await.expect("Failed publishing to catalog.");
+
+        Ok(())
     }
     
     // request_resource(peer_addr, resource_name, num_views) : request resource from peer for a certain number of views.
@@ -394,11 +402,11 @@ impl Peer {
         // Create the request message in JSON format
         let request_message = serde_json::json!({
             "type": "request",
-            "user" : format!("{:?}", self.public_socket.local_addr()),
+            "user" : format!("{:?}", self.public_socket.local_addr().unwrap()),
             "provider" : format!("{:?}", peer_addr),
             "resource_name": resource_name,
             "num_views": num_views,
-            "UUID": format!("req:{:?}|{:?}|{}", peer_addr, self.public_socket.local_addr(), resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+            "UUID": format!("req:{:?}|{:?}|{}", peer_addr, self.public_socket.local_addr().unwrap(), resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
         }).to_string();
 
         let params = vec!["permissions"];
@@ -447,11 +455,11 @@ impl Peer {
             let entry = json!({
                 "type": "grant",
                 "resource": resource_n,
-                "provider": format!("{:?}",myself.public_socket.local_addr()),
+                "provider": format!("{:?}",myself.public_socket.local_addr().unwrap()),
                 "user": format!("{:?}", peer_addr),
                 "num_views": num_views,
                 "remaining": num_views,
-                "UUID": format!("grant:{:?}|{:?}|{}", myself.public_socket.local_addr(), peer_addr, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
+                "UUID": format!("grant:{:?}|{:?}|{}", myself.public_socket.local_addr().unwrap(), peer_addr, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
             }).to_string();
             let params = vec!["permissions"];
             let _ =  myself.client.send_data_with_params(entry.as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
@@ -471,7 +479,6 @@ impl Peer {
                 Err(e) => {
                     eprintln!("Failed to send to peer: {:?}", e);
                 }
-                
             };
 
             // await OK
@@ -489,12 +496,31 @@ impl Peer {
                 return;
             }
 
-            let encrypted_data =  match myself.encrypt_img(&resource_path, num_views).await {
-                Ok(encrypted_data) => encrypted_data,
-                Err(_) => {
-                    return;
+            // let mut encrypted_data =  match myself.encrypt_img(&resource_path, num_views).await {
+            //     Ok(encrypted_data) => encrypted_data,
+            //     Err(_) => {
+            //         return;
+            //     }
+            // };
+
+            // Construct the file path by appending .encrp to the resource name
+            let file_path = std::path::Path::new("resources/encrypted").join(format!("{}.encrp", resource_n));
+            // Read the encrypted data from the file
+            let mut encrypted_data: Vec<u8> = match std::fs::read(&file_path) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("Failed to read encrypted data from file {}: {}", file_path.display(), e);
+                    Vec::new() // Return an empty vector on error
                 }
             };
+
+            // Encode access info
+            let encoded: String = format!("{:?}.{}", myself.public_socket.local_addr().unwrap(), num_views);
+            // Pad to the maximum length, accomodating for possibly ipv6 addresses
+            let padded = format!("{:<width$}", encoded, width=62);
+
+            // Add padded to data at the end
+            encrypted_data.extend_from_slice(padded.as_bytes());
         
             // Send the encrypted image to the peer
             send_reliable(&socket, &encrypted_data, addr).await.expect("Failed to send resource to peer");
@@ -506,7 +532,7 @@ impl Peer {
             // Only if everything is successful:
             // delete original request from DOS directory of services
             let filter = json!({
-                "UUID": format!("req:{:?}|{:?}|{}", myself.public_socket.local_addr(), peer_addr, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
+                "UUID": format!("req:{:?}|{:?}|{}", myself.public_socket.local_addr().unwrap(), peer_addr, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
             }).to_string();
             let _ =  myself.client.send_data_with_params(filter.as_bytes().to_vec(), "DeleteDocument", params.clone()).await.unwrap();
             
