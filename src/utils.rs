@@ -4,12 +4,26 @@ use steganography::decoder::*;
 use steganography::util::*;
 use base64;
 use std::error::Error;
+use std::io::Write;
+use std::path::Path;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, Duration, timeout};
 use std::net::SocketAddr;
 use std::io;
 use std::collections::HashMap;
 use regex::Regex;
+use tempfile::Builder;
+use std::fs::File as __File;
+
+
+
+use image::{
+    DynamicImage,
+    ImageBuffer,
+    Rgba,
+    open
+};
+
 
 use winit::{
     event::{Event, WindowEvent},
@@ -66,10 +80,38 @@ pub async fn server_decrypt_img(base_img_path: &str, output_hidden_img_path: &st
     output_file.write_all(&decoded_img_bytes).await.expect("Failed to write decoded image");
     Ok(())
 }
+pub async fn write_to_file(file_path: &str, data: &[u8]) -> Result<(), std::io::Error> {
+    match File::create(file_path).await {
+        Ok(mut file) => {
+            file.write_all(data).await?;
+            println!("File saved to '{}'.", file_path);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Failed to create file '{}': {}", file_path, e);
+            Err(e)
+        }
+    }
+}
 
 // peer decrypt: gets raw data of an encrypted image extracts the hidden image and returns it as bytes following the logic of read_from_img but using the raw image istead of the image path
 pub async fn peer_decrypt_img(encoded_img: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error + 'static>> {
-    /* let decoder = Decoder::new(encoded_image);
+    let  mut temp_file = Builder::new()
+        .suffix(".png") // Specify the .jpg extension
+        .tempfile()?;
+    // Write the bytes to the temporary file
+    let img_path = temp_file.path().to_path_buf(); // Get the file path
+    {
+        let mut file = __File::create(&img_path)?;
+        file.write_all(encoded_img)?;
+    }
+    // let path = Path::new("resources/tmp.png");
+    // write_to_file("resources/tmp.png", encoded_img).await?;
+    // temp_file.write_all(encoded_img).await?;
+    // let img_path = img_path;
+    let encoded_image = file_as_image_buffer(img_path.to_string_lossy().to_string());
+
+    let decoder = Decoder::new(encoded_image);
     let out_buffer = decoder.decode_alpha();
     let clean_buffer: Vec<u8> = out_buffer.into_iter()
                                     .filter(|b| {
@@ -78,10 +120,11 @@ pub async fn peer_decrypt_img(encoded_img: &Vec<u8>) -> Result<Vec<u8>, Box<dyn 
                                     .collect();
     let message = bytes_to_str(clean_buffer.as_slice());
     // println!("{:?}", message);
-    message.to_string() */
+    // message.to_string() 
     
     // Extract the hidden message (base64-encoded image)
-    let encoded_message = bytes_to_str(encoded_img.as_slice());
+    // let encoded_message = bytes_to_str(encoded_img.as_slice());
+    let encoded_message = message.to_string();
     // print!("encoded_message: {}", encoded_message);
     // Decode the base64-encoded message back to image bytes
     let decoded_img_bytes = match base64::decode(&encoded_message) {
@@ -311,7 +354,7 @@ pub async fn recv_reliable(socket: &UdpSocket, duration:Option<Duration>) -> Res
         }
     }
     let f_size = complete_data.len();
-    println!("end recv chunks");
+    // println!("end recv chunks");
 
     Ok((complete_data, f_size, address))
 }

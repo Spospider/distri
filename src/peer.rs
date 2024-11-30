@@ -215,10 +215,6 @@ impl Peer {
             })
             .cloned()
             .collect();
-        println!("in handle_grant_msg1");
-        println!("{:?}", pending);
-        println!("{:?} = {:?}", peer_id,  pending[0]["provider"].as_str().unwrap_or("") );
-        println!("{:?} = {:?}", pending[0]["resource"].as_str().unwrap_or("1"),  r_name.as_str().unwrap_or(""));
 
         // If `matched_items` is empty, no items were filtered out
         if matched_items.is_empty() {
@@ -244,7 +240,7 @@ impl Peer {
                     return;
                 }
             };
-            let og_filename = json_obj["resource_name"].as_str().unwrap_or("unknown");
+            let og_filename = json_obj["resource"].as_str().unwrap_or("unknown");
             let output_path = format!("resources/borrowed/{}.encrp", og_filename);
             if let Err(e) = async {
                 let mut file = tokio::fs::File::create(&output_path).await?;
@@ -631,7 +627,6 @@ impl Peer {
             let encoded: String = format!("{:?};{}", myself.id, num_views);
             // Pad to the maximum length, accomodating for possibly ipv6 addresses
             let padded = format!("{:<width$}", encoded, width=62);
-            // TODOhow to reverse this to get id and num_views back from padded string
 
             // Add padded to data at the end
             encrypted_data.extend_from_slice(padded.as_bytes());
@@ -664,7 +659,7 @@ impl Peer {
     // if num_of_views == 0, it deletes the entry from the fhe folder and the directory of service
     pub async fn access_resource(&self, resource_name: &str, peer_id: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         // Check if the encrypted resource exists
-        let file_path = std::path::Path::new("resources/encrypted").join(format!("{}.encrp", resource_name));
+        let file_path = std::path::Path::new("resources/borrowed").join(format!("{}.encrp", resource_name));
         if !std::fs::metadata(&file_path).is_ok() {
             eprintln!("Encrypted resource '{}' not found in the 'resources/encrypted' folder.", resource_name);
             return Err("Resource not found".into());
@@ -678,14 +673,21 @@ impl Peer {
                 return Err(e.into());
             }
         };
+        // println!("Encrypted data {:?}", encrypted_data);
 
         // Extract the access info from the last 62 bytes
-        let access_info = String::from_utf8_lossy(&encrypted_data[encrypted_data.len() - 62..]);
-        let parts: Vec<&str> = access_info.split('.').collect();
+        let mut access_info = String::from_utf8_lossy(&encrypted_data[encrypted_data.len() - 62..]).to_string();
+        access_info = access_info.trim().to_string();
+
+        println!("accessinfo: {}", access_info);
+        println!("path: {:?}", file_path);
+
+        let parts: Vec<&str> = access_info.split(';').collect();
         if parts.len() != 2 {
             eprintln!("Invalid access info found in the encrypted data: {}", access_info);
             return Err("Invalid access info".into());
         }
+        
 
         // Extract the number of views
         let num_views = match parts[1].parse::<u32>() {
@@ -723,7 +725,8 @@ impl Peer {
         }
 
         // Decrypt the image data
-        let decrypted_data = peer_decrypt_img(&encrypted_data).await?;
+        let img = &encrypted_data[..encrypted_data.len() - 62].to_vec();
+        let decrypted_data = peer_decrypt_img(img).await?;
 
 
         // Update the remaining views in the directory of service

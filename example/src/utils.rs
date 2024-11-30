@@ -54,6 +54,37 @@ pub async fn server_decrypt_img(base_img_path: &str, output_hidden_img_path: &st
 }
 
 
+// peer decrypt: gets raw data of an encrypted image extracts the hidden image and returns it as bytes following the logic of read_from_img but using the raw image istead of the image path
+pub async fn peer_decrypt_img(encoded_img: &Vec<u8>) -> Result<Vec<u8>, Box<dyn Error + 'static>> {
+    /* let decoder = Decoder::new(encoded_image);
+    let out_buffer = decoder.decode_alpha();
+    let clean_buffer: Vec<u8> = out_buffer.into_iter()
+                                    .filter(|b| {
+                                        *b != 0xff_u8
+                                    })
+                                    .collect();
+    let message = bytes_to_str(clean_buffer.as_slice());
+    // println!("{:?}", message);
+    message.to_string() */
+    
+    // Extract the hidden message (base64-encoded image)
+    let encoded_message = bytes_to_str(encoded_img.as_slice());
+    // print!("encoded_message: {}", encoded_message);
+    // Decode the base64-encoded message back to image bytes
+    let decoded_img_bytes = match base64::decode(&encoded_message) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("Failed to decode base64: {}", e);
+            return Err(Box::new(e));  // use a simple error here
+        }
+    };
+    Ok(decoded_img_bytes)
+}
+
+
+
+
+
 pub async fn decrypt_image(input_path: &str, output_path: &str) -> Result<(), std::io::Error> {
     match server_decrypt_img(input_path, output_path).await {
         Ok(_) => {

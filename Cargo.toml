@@ -19,6 +19,7 @@ regex = "1.11.1"
 colored = "2.1.0"
 winit = "0.28.6"
 pixels = "0.14.0"
+tempfile = "3.14.0"
 
 
 [dependencies.uuid]
