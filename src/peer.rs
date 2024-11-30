@@ -13,7 +13,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 use serde_json::{to_vec, Value, json};
-use crate::utils::{recv_reliable, recv_with_timeout, send_reliable, send_with_retry, server_decrypt_img, server_encrypt_img, CHUNK_SIZE, DEFAULT_TIMEOUT, MAX_RETRIES};
+use crate::utils::{recv_reliable, recv_with_timeout, send_reliable, send_with_retry, server_decrypt_img, peer_decrypt_img, server_encrypt_img, CHUNK_SIZE, DEFAULT_TIMEOUT, MAX_RETRIES};
 
 use crate::client::Client;
 
@@ -542,4 +542,90 @@ impl Peer {
         Ok(())
     }
 
+    // access_resource(resource_name, provider_addr)
+    // it checks first if "resources/encrypted/resource_name.encrp" exists or not
+    // if not, it returns an error, and if yes, it reads the encrp file
+    // then it extracts the last 62 bits, and from them extracts num_of_views
+    // finally, if num_of_views > 0, it decrypts the image using peer_decrypt_img, decrement remaining in the directory of service, and returns the raw image data
+    // if num_of_views == 0, it deletes the entry from the fhe folder and the directory of service
+    pub async fn access_resource(&self, resource_name: &str, provider_addr: SocketAddr) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        // Check if the encrypted resource exists
+        let file_path = std::path::Path::new("resources/encrypted").join(format!("{}.encrp", resource_name));
+        if !std::fs::metadata(&file_path).is_ok() {
+            eprintln!("Encrypted resource '{}' not found in the 'resources/encrypted' folder.", resource_name);
+            return Err("Resource not found".into());
+        }
+
+        // Read the encrypted data from the file
+        let encrypted_data: Vec<u8> = match std::fs::read(&file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read encrypted data from file {}: {}", file_path.display(), e);
+                return Err(e.into());
+            }
+        };
+
+        // Extract the access info from the last 62 bytes
+        let access_info = String::from_utf8_lossy(&encrypted_data[encrypted_data.len() - 62..]);
+        let parts: Vec<&str> = access_info.split('.').collect();
+        if parts.len() != 2 {
+            eprintln!("Invalid access info found in the encrypted data: {}", access_info);
+            return Err("Invalid access info".into());
+        }
+
+        // Extract the number of views
+        let num_views = match parts[1].parse::<u32>() {
+            Ok(views) => views,
+            Err(e) => {
+                eprintln!("Failed to parse the number of views from '{}': {}", parts[1], e);
+                return Err(e.into());
+            }
+        };
+
+        // Check if the number of views is greater than 0
+        if num_views == 0 {
+            // delete the entry from the folder and the directory of service
+            let entry = json!({
+                "type": "grant",
+                "resource": resource_name,
+                "provider": format!("{:?}", provider_addr),
+                "user": format!("{:?}", self.public_socket.local_addr().unwrap()),
+                "num_views": num_views,
+                "remaining": num_views,
+                "UUID": format!("grant:{:?}|{:?}|{}", provider_addr, self.public_socket.local_addr().unwrap(), resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+            }).to_string();
+            let params = vec!["permissions"];
+            let _ =  self.client.send_data_with_params(entry.as_bytes().to_vec(), "DeleteDocument", params.clone()).await.unwrap();
+
+            // Delete the encrypted resource file
+            if let Err(e) = std::fs::remove_file(&file_path) {
+                eprintln!("Failed to delete the encrypted resource file '{}': {}", file_path.display(), e);
+            }
+
+            // return an error
+            eprintln!("No views remaining for resource '{}'.", resource_name);
+            return Err("No views remaining".into());
+        }
+
+        // Decrypt the image data
+        let decrypted_data = peer_decrypt_img(&encrypted_data).await?;
+
+
+        // Update the remaining views in the directory of service
+        let entry = json!({
+            "type": "grant",
+            "resource": resource_name,
+            "provider": format!("{:?}", provider_addr),
+            "user": format!("{:?}", self.public_socket.local_addr().unwrap()),
+            "num_views": num_views - 1,
+            "remaining": num_views - 1,
+            "UUID": format!("grant:{:?}|{:?}|{}", provider_addr, self.public_socket.local_addr().unwrap(), resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+        }).to_string(); 
+        let params = vec!["permissions"];
+        let _ =  self.client.send_data_with_params(entry.as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
+
+        // Return the decrypted image data
+        Ok(decrypted_data)
+
+    }
 }
