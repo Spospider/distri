@@ -15,27 +15,27 @@ use tokio::time::Duration;
 
 pub struct Client {
     nodes: HashMap<String, SocketAddr>,  // Keeps track of server nodes
-    chunk_size: usize,
+    // chunk_size: usize,
 }
 
 impl Default for Client {
     fn default() -> Self {
         Client {
             nodes: HashMap::new(),
-            chunk_size: 1024,
+            // chunk_size: 1024,
         }
     }
 }
 
 impl Client {
     /// Creates a new client instance
-    pub fn new(nodes: Option<HashMap<String, SocketAddr>>, chunk_size: Option<usize>) -> Self {
+    pub fn new(nodes: Option<HashMap<String, SocketAddr>>, _chunk_size: Option<usize>) -> Self {
         let initial_nodes = nodes.unwrap_or_else(HashMap::new);
-        let final_chunk_size: usize = chunk_size.unwrap_or(1024);
+        // let final_chunk_size: usize = chunk_size.unwrap_or(1024);
 
         Client {
             nodes: initial_nodes,
-            chunk_size: final_chunk_size,
+            // chunk_size: final_chunk_size,
         }
     }
 

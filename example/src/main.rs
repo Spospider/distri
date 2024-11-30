@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
+// use tokio::time::sleep;
 use std::collections::HashSet;
 use serde_json::{to_vec, Value, json};
 
@@ -51,11 +51,11 @@ async fn main() {
     match mode.as_str() {
         "server" => {
             // Server Mode
-            let identifier = args.identifier.unwrap_or(10);
+            // let identifier = args.identifier.unwrap_or(10);
 
             // Initialize server and other nodes in the network
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
-            for (i, addr) in other_ips.iter().enumerate() {
+            for (_, addr) in other_ips.iter().enumerate() {
                 node_map.insert(addr.port().to_string(), *addr);
             }
 
@@ -78,7 +78,7 @@ async fn main() {
             for (i, addr) in other_ips.iter().enumerate() {
                 node_map.insert(format!("Server{}", i + 1), *addr);
             }
-            let mut client = Client::new(Some(node_map.clone()), Some(chunk_size));
+            let  client = Client::new(Some(node_map.clone()), Some(chunk_size));
 
             // Register all servers in the client node map
             // for (name, addr) in &node_map {
@@ -159,7 +159,7 @@ async fn main() {
             
             println!("Reading directory of service...");
             // Read directory of service filtered
-            let mut filter =json!({
+            let filter =json!({
                 "doc" : "1"
             }); 
             let params = vec!["catalog"];
@@ -175,7 +175,7 @@ async fn main() {
             // Optionally gather stats if `report` flag is set
             if report {
                 println!("doing report");
-                client.collect_stats().await;
+                let _ = client.collect_stats().await;
                 println!("Total failed Tasks: {}", failures);
                 println!("Total Test Time: {}", elapsed.as_secs_f64());
             }

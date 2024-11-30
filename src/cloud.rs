@@ -31,7 +31,7 @@ pub struct NodeInfo {
 pub struct CloudNode {
     nodes: Arc<Mutex<HashMap<String, NodeInfo>>>,  // Keeps track of other cloud nodes
     public_socket: Arc<UdpSocket>,
-    chunk_size: Arc<usize>,
+    // chunk_size: Arc<usize>,
     elected: Arc<Mutex<bool>>,   // Elected state wrapped in Mutex for safe mutable access
     failed: Arc<Mutex<bool>>,
     load: Arc<Mutex<i32>>,
@@ -59,7 +59,7 @@ impl CloudNode {
         num_workers:u32,
         address: SocketAddr,
         nodes: Option<HashMap<String, SocketAddr>>,
-        chunk_size: usize,
+        _chunk_size: usize,
         table_names: Option<Vec<&str>>,
     ) -> Result<Arc<Self>> {
         // let initial_nodes = nodes.unwrap_or_else(HashMap::new);
@@ -91,7 +91,7 @@ impl CloudNode {
         Ok(Arc::new(CloudNode {
             nodes: Arc::new(Mutex::new(initial_nodes)),
             public_socket: Arc::new(socket),
-            chunk_size:Arc::new(chunk_size),
+            // chunk_size:Arc::new(chunk_size),
             elected: Arc::new(Mutex::new(true)),
             failed: Arc::new(Mutex::new(failed)),
             load: Arc::new(Mutex::new(0)),

@@ -280,8 +280,7 @@ impl Peer {
 
     }
     
-    // fetch_collection(): fetches any collection from the cloud, returns the json.
-    /// Fetch a collection from a server and store it locally
+    // fetch_collection(): fetches any collection from the cloud, returns the json list.
     async fn fetch_collection(
         &self,
         collection_name: &str,
