@@ -136,7 +136,7 @@ impl Peer {
         let serve_self = self.clone();
         tokio::spawn(async move {
             loop {
-                println!("looping");
+                // println!("looping");
                 println!("pending_approval: {:?}", serve_self.pending_approval.lock().await);
                 println!("inbox_queue: {:?}", serve_self.inbox_queue.lock().await);
                 println!("available_resources: {:?}", serve_self.available_resources.lock().await);
@@ -202,7 +202,7 @@ impl Peer {
 
     async fn handle_grant_msg(&self, addr:SocketAddr, json_obj:Value) {
         let mut pending = self.pending_approval.lock().await;
-        println!("in handle_grant_msg");
+        // println!("in handle_grant_msg");
 
         // Collect the items that match the condition into a separate vector
         let r_name = json_obj["resource"].clone();
@@ -218,7 +218,7 @@ impl Peer {
 
         // If `matched_items` is empty, no items were filtered out
         if matched_items.is_empty() {
-            println!("in handle_grant_msg RETURNING");
+            // println!("in handle_grant_msg RETURNING");
             // did not request this resource, ignore it
             return;
         }
@@ -226,12 +226,12 @@ impl Peer {
         if json_obj["num_views"].as_u64().unwrap() > 0 { // if 0, then resource grant is denied
             // Send OK acknowledgment
             let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-            println!("in handle_grant_msg sending ok");
+            // println!("in handle_grant_msg sending ok");
             if let Err(e) = send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await {
                 eprintln!("Failed to send acknowledgment: {:?}", e);
                 return;
             }
-            println!("in handle_grant_msg2");
+            // println!("in handle_grant_msg2");
             // do recev_reliable to recieve img data, and save it in resources/borrowed as 'og_filename.encrp' to have uniform extention 
             let img_data = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((data, _, _)) => data,
@@ -511,7 +511,7 @@ impl Peer {
         resource_name: &str,
         num_views: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        println!("grant_resource1");
+        // println!("grant_resource1");
         
         let resource_path = format!("./resources/encrypted/{}.encrp", resource_name);
     
@@ -520,11 +520,11 @@ impl Peer {
             eprintln!("Resource '{}' not found in the 'resources' folder.", resource_name);
             return Err("Resource not found".into());
         }
-        println!("grant_resource2");
+        // println!("grant_resource2");
         let myself = self.clone();
         let resource_n = resource_name.to_string();
         let peer_id_ = peer_id.to_string();
-        println!("grant_resource3");
+        // println!("grant_resource3");
 
         // tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
@@ -563,7 +563,7 @@ impl Peer {
                     "UUID": format!("grant:{:?}|{:?}|{}", myself.id, peer_id_, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
                 }).to_string();
                 let params = vec!["permissions"];
-                println!("grant_resource4");
+                // println!("grant_resource4");
                 
                 let _ =  myself.client.send_data_with_params(entry.clone().as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
             }
@@ -573,7 +573,7 @@ impl Peer {
             inbox.retain(|item| {
                 !(peer_id_ == item["user"].as_str().unwrap_or("") && item["resource"].as_str() == Some(&resource_n))
             });
-            println!("grant_resource4");
+            // println!("grant_resource4");
 
             // send grant message  to peer to exchange data 
             println!("sending grant resource to {}", myself.resolve_id(peer_id_.as_str()).await.unwrap());
@@ -586,7 +586,7 @@ impl Peer {
                     eprintln!("Failed to send to peer: {:?}", e);
                 }
             };
-            println!("grant_resource5");
+            // println!("grant_resource5");
 
             // await OK
             let mut buffer = [0u8; 1024];
@@ -679,8 +679,8 @@ impl Peer {
         let mut access_info = String::from_utf8_lossy(&encrypted_data[encrypted_data.len() - 62..]).to_string();
         access_info = access_info.trim().to_string();
 
-        println!("accessinfo: {}", access_info);
-        println!("path: {:?}", file_path);
+        // println!("accessinfo: {}", access_info);
+        // println!("path: {:?}", file_path);
 
         let parts: Vec<&str> = access_info.split(';').collect();
         if parts.len() != 2 {
