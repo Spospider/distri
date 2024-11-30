@@ -643,9 +643,6 @@ impl Peer {
 
             // Only if everything is successful:
             // delete original request from DOS directory of services
-            // let filter = json!({
-            //     "UUID": format!("req:{:?}|{:?}|{}", myself.id, peer_id_, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
-            // }).to_string();
             let filter = json!({
                 "type" : "request",
                 "user" : peer_id_,
@@ -660,6 +657,116 @@ impl Peer {
     
         Ok(())
     }
+
+    pub async fn update_permissions(
+        self: &Arc<Self>,
+        peer_id: &str,
+        resource_name: &str,
+        num_views: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {    
+
+        let resource_path = format!("./resources/encrypted/{}.encrp", resource_name);
+        // Check if the resource exists
+        if !tokio::fs::metadata(&resource_path).await.is_ok() {
+            eprintln!("Resource '{}' not found in the 'resources' folder.", resource_name);
+            return Err("Resource not found".into());
+        }
+        let myself = self.clone();
+        let resource_n = resource_name.to_string();
+        let peer_id_ = peer_id.to_string();
+
+        // tokio::spawn(async move {
+            let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+
+            // update directory of service with this permission grant
+            let entry = json!({
+                "type": "grant",
+                "resource": resource_n,
+                "provider": *myself.id.clone(),
+                "user": peer_id_,
+                "num_views": num_views,
+                "remaining": num_views,
+                "UUID": format!("grant:{:?}|{:?}|{}", myself.id, peer_id_, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
+            }).to_string();
+            let params = vec!["permissions"];            
+            let _ =  myself.client.send_data_with_params(entry.clone().as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
+
+            // send grant message  to peer to exchange data 
+            println!("sending grant resource to {}", myself.resolve_id(peer_id_.as_str()).await.unwrap());
+            let _ = match send_with_retry(&socket, entry.clone().as_bytes(), myself.resolve_id(peer_id_.as_str()).await.expect("Failed grant address resolve"), MAX_RETRIES).await {
+                Ok(()) => (), // Successfully received data
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    // unreachable peer
+                },
+                Err(e) => {
+                    eprintln!("Failed to send to peer: {:?}", e);
+                }
+            };
+
+            // await OK
+            let mut buffer = [0u8; 1024];
+            // Now, listen for the first response that comes back from any node
+            let (size, addr) = match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
+                Ok ((size, addr)) => (size, addr),
+                Err(_) => {
+                    return Err("Ok timed out".into());
+                    // return;
+                }
+            };
+
+            let response = String::from_utf8_lossy(&buffer[..size]);
+            if response != "OK" {
+                return Err("No ok".into());
+                // return;
+            }
+
+            // let mut encrypted_data =  match myself.encrypt_img(&resource_path, num_views).await {
+            //     Ok(encrypted_data) => encrypted_data,
+            //     Err(_) => {
+            //         return;
+            //     }
+            // };
+
+            // Construct the file path by appending .encrp to the resource name
+            let file_path = std::path::Path::new("resources/encrypted").join(format!("{}.encrp", resource_n));
+            // Read the encrypted data from the file
+            let mut encrypted_data: Vec<u8> = match std::fs::read(&file_path) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("Failed to read encrypted data from file {}: {}", file_path.display(), e);
+                    Vec::new() // Return an empty vector on error
+                }
+            };
+
+            // Encode access info
+            let encoded: String = format!("{:?};{}", myself.id, num_views);
+            // Pad to the maximum length, accomodating for possibly ipv6 addresses
+            let padded = format!("{:<width$}", encoded, width=62);
+
+            // Add padded to data at the end
+            encrypted_data.extend_from_slice(padded.as_bytes());
+        
+            // Send the encrypted image to the peer
+            send_reliable(&socket, &encrypted_data, addr).await.expect("Failed to send resource to peer");
+            println!(
+                "- Granted resource '{}' with {} views to peer {}",
+                resource_n, num_views, peer_id_
+            );
+
+            // Only if everything is successful:
+            // delete original request from DOS directory of services
+            let filter = json!({
+                "type" : "request",
+                "user" : peer_id_,
+                "provider" : *myself.id.clone(),
+                "resource" : resource_n,
+            }).to_string();
+            println!("deleting UUID: {}", format!("req:{:?}|{:?}|{}", myself.id, peer_id_, resource_n));
+            let _ =  myself.client.send_data_with_params(filter.as_bytes().to_vec(), "DeleteDocument", params.clone()).await.unwrap();
+        // });    
+        Ok(())
+    }
+
 
     pub async fn pending_approval(&self) -> Vec<Value>{
         let filter = json!({
@@ -740,6 +847,19 @@ impl Peer {
         return transactions
     }
 
+    pub async fn shared_images(&self) -> Vec<Value>{
+        let filter = json!({
+            "type" : "grant",
+            "provider" : *self.id.clone(),
+        });
+ 
+        let transactions =  self.fetch_collection("permissions", Some(filter)).await.expect("Failed to fetch from 'permissions' collection");
+
+        return transactions
+    }
+
+
+
     // access_resource(resource_name, provider_addr)
     // it checks first if "resources/encrypted/resource_name.encrp" exists or not
     // if not, it returns an error, and if yes, it reads the encrp file
@@ -776,27 +896,67 @@ impl Peer {
             eprintln!("Invalid access info found in the encrypted data: {}", access_info);
             return Err("Invalid access info".into());
         }
-        
+
+        // get num of views from dir of service
+        let mut num_views:u32 = 0;
+        let entry = serde_json::json!({
+            "UUID": format!("grant:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+        });
+        let params = vec!["permissions"];
+        let result =  self.client.send_data_with_params(entry.to_string().as_bytes().to_vec(), "ReadCollection", params.clone()).await.unwrap_or("[]".as_bytes().to_vec());
+
+        let json_result: Value = serde_json::from_slice(&result).unwrap();
+        // let mut exist:bool = false;
+        if let Some(json_array) = json_result.as_array() {
+            if json_array.is_empty() {
+                num_views = match parts[1].parse::<u32>() {
+                    Ok(views) => views,
+                    Err(e) => {
+                        eprintln!("Failed to parse the number of views from '{}': {}", parts[1], e);
+                        return Err(e.into());
+                    }
+                };
+            } else {
+                // exist = true;
+                num_views = json_array[0]["num_views"].as_u64().unwrap_or(0) as u32;
+                println!("The JSON array is not empty.");
+            }
+        }
 
         // Extract the number of views
-        let num_views = match parts[1].parse::<u32>() {
-            Ok(views) => views,
-            Err(e) => {
-                eprintln!("Failed to parse the number of views from '{}': {}", parts[1], e);
-                return Err(e.into());
-            }
-        };
+        // let num_views = match parts[1].parse::<u32>() {
+        //     Ok(views) => views,
+        //     Err(e) => {
+        //         eprintln!("Failed to parse the number of views from '{}': {}", parts[1], e);
+        //         return Err(e.into());
+        //     }
+        // };
 
         // Check if the number of views is greater than 0
-        if num_views == 0 {
+        
+
+        // Decrypt the image data
+        let img = &encrypted_data[..encrypted_data.len() - 62].to_vec();
+        let decrypted_data = peer_decrypt_img(img).await?;
+
+
+        // Update the remaining views in the directory of service
+        let entry = json!({
+            "type": "grant",
+            "user" : *self.id.clone(),
+            "provider" : peer_id,
+            "resource": resource_name,
+            "num_views": num_views - 1,
+            "remaining": num_views - 1,
+            "UUID": format!("grant:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+        }).to_string();
+        let params = vec!["permissions"];
+        let _ =  self.client.send_data_with_params(entry.as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
+        println!("updated DOS {}", num_views - 1);
+
+        if num_views-1 == 0 {
             // delete the entry from the folder and the directory of service
             let entry = serde_json::json!({
-                "type": "grant",
-                "user" : *self.id.clone(),
-                "provider" : peer_id,
-                "resource": resource_name,
-                "num_views": num_views,
-                "remaining": num_views,
                 "UUID": format!("grant:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
             });
             
@@ -810,27 +970,8 @@ impl Peer {
 
             // return an error
             eprintln!("No views remaining for resource '{}'.", resource_name);
-            return Err("No views remaining".into());
+            // return Err("No views remaining".into());
         }
-
-        // Decrypt the image data
-        let img = &encrypted_data[..encrypted_data.len() - 62].to_vec();
-        let decrypted_data = peer_decrypt_img(img).await?;
-
-
-        // Update the remaining views in the directory of service
-        let entry = serde_json::json!({
-            "type": "grant",
-            "user" : *self.id.clone(),
-            "provider" : peer_id,
-            "resource": resource_name,
-            "num_views": num_views - 1,
-            "remaining": num_views - 1,
-            "UUID": format!("grant:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
-        });
-        let params = vec!["permissions"];
-        let _ =  self.client.send_data_with_params(entry.to_string().as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
-
         // Return the decrypted image data
         Ok(decrypted_data)
 
