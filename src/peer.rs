@@ -457,10 +457,10 @@ impl Peer {
             "resource_name": resource_name,
             "num_views": num_views,
             "UUID": format!("req:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
-        }).to_string();
+        });
 
         let params = vec!["permissions"];
-        let _ =  self.client.send_data_with_params(request_message.as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
+        let _ =  self.client.send_data_with_params(request_message.to_string().as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
     
         // Send the request to the peer
         send_with_retry(
@@ -470,7 +470,11 @@ impl Peer {
             MAX_RETRIES,
         )
         .await?;
-    
+
+        // add to pending
+        let mut pending = self.pending_approval.lock().await;
+        pending.push(request_message);
+        
         println!(
             "Requested resource '{}' with {} views from peer {}",
             resource_name, num_views, peer_id
