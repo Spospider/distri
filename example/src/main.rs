@@ -14,6 +14,8 @@ use serde_json::{to_vec, Value, json};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
+use show_image::*;
+
 mod utils;
 use utils::{decrypt_image, write_to_file};
 
@@ -33,6 +35,7 @@ struct Arguments {
     ips: Vec<String>,
 }
 
+#[show_image::main]
 #[tokio::main]
 async fn main() {
     let args = Arguments::parse();

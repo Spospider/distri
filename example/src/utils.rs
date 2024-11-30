@@ -4,12 +4,22 @@ use std::error::Error;
 use steganography::decoder::*;
 use steganography::util::*;
 
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
-};
 use pixels::{Pixels, SurfaceTexture};
+// use winit::{
+//     dpi::LogicalSize,
+//     event::{Event, WindowEvent},
+//     event_loop::{ControlFlow, EventLoop},
+//     platform::run_return::EventLoopExtRunReturn,
+//     window::WindowBuilder,
+// };
+use image::GenericImageView;
+
+
+use std::thread;
+use std::time::Duration;
+
+use show_image::*;
+
 
 // Helper functions
 
@@ -118,37 +128,17 @@ pub fn show_image(image_data: Vec<u8>) -> Result<(), Box<dyn Error>> {
     let img = img.to_rgba8(); // Convert to RGBA format
     let (width, height) = img.dimensions();
 
-    // Create a window
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Image Viewer")
-        .with_inner_size(winit::dpi::LogicalSize::new(width, height))
-        .build(&event_loop)?;
+    // Convert the image to a flat vector of u8 pixel data
+    let pixel_data: Vec<u8> = img.into_raw();
 
-    // Create a pixels surface
-    let surface_texture = SurfaceTexture::new(width, height, &window);
-    let mut pixels = Pixels::new(width, height, surface_texture)?;
+    // Create an ImageView with the loaded image data
+    let image = ImageView::new(ImageInfo::rgba8(width, height), &pixel_data);
 
-    // Copy the image data into the pixel buffer
-    let frame = pixels.frame_mut();
-    frame.copy_from_slice(&img.into_raw());
+    // Create a window with default options and display the image
+    let window = create_window("image", Default::default()).unwrap();
+    window.set_image("image-001", image);
 
-
-    // Run the event loop
-    event_loop.run(move |event, _, control_flow| {
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => *control_flow = ControlFlow::Exit, // Close the window
-            Event::RedrawRequested(_) => {
-                if pixels.render().is_err() {
-                    eprintln!("Failed to render image");
-                    *control_flow = ControlFlow::Exit;
-                }
-            }
-            _ => (),
-        }
-        window.request_redraw();
-    });
+    thread::sleep(Duration::from_secs(2));
+    
+    Ok(())
 }

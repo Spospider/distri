@@ -29,6 +29,7 @@ use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
+    platform::run_return::EventLoopExtRunReturn
 };
 use pixels::{Pixels, SurfaceTexture};
 
@@ -375,7 +376,7 @@ pub fn extract_variable(input: &str) -> Result<String, io::Error> {
 }
 
 
-pub fn show_image(image_data: Vec<u8>) -> Result<(), Box<dyn Error>> {
+pub fn show_image(image_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     // Decode the image data
     let img = image::load_from_memory(&image_data)?;
     let img = img.to_rgba8(); // Convert to RGBA format
@@ -396,14 +397,18 @@ pub fn show_image(image_data: Vec<u8>) -> Result<(), Box<dyn Error>> {
     let frame = pixels.frame_mut();
     frame.copy_from_slice(&img.into_raw());
 
+    // Run the event loop with `run_return`
+    let mut event_loop = EventLoop::new();
+    event_loop.run_return(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait; // Ensure the loop doesn't block indefinitely
 
-    // Run the event loop
-    event_loop.run(move |event, _, control_flow| {
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => *control_flow = ControlFlow::Exit, // Close the window
+            } => {
+                *control_flow = ControlFlow::Exit; // Exit the event loop
+            }
             Event::RedrawRequested(_) => {
                 if pixels.render().is_err() {
                     eprintln!("Failed to render image");
@@ -414,4 +419,6 @@ pub fn show_image(image_data: Vec<u8>) -> Result<(), Box<dyn Error>> {
         }
         window.request_redraw();
     });
+
+    Ok(())
 }

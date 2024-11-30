@@ -15,6 +15,7 @@ regex = "1.11.1"
 winit = "0.28.6"
 pixels = "0.14.0"
 image = "0.25.5"
+show-image = "0.13.1"
 
 
 [dependencies.uuid]
