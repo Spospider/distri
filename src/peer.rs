@@ -661,7 +661,7 @@ impl Peer {
     // then it extracts the last 62 bits, and from them extracts num_of_views
     // finally, if num_of_views > 0, it decrypts the image using peer_decrypt_img, decrement remaining in the directory of service, and returns the raw image data
     // if num_of_views == 0, it deletes the entry from the fhe folder and the directory of service
-    pub async fn access_resource(&self, resource_name: &str, provider_addr: SocketAddr) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    pub async fn access_resource(&self, resource_name: &str, peer_id: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         // Check if the encrypted resource exists
         let file_path = std::path::Path::new("resources/encrypted").join(format!("{}.encrp", resource_name));
         if !std::fs::metadata(&file_path).is_ok() {
@@ -698,17 +698,18 @@ impl Peer {
         // Check if the number of views is greater than 0
         if num_views == 0 {
             // delete the entry from the folder and the directory of service
-            let entry = json!({
+            let entry = serde_json::json!({
                 "type": "grant",
+                "user" : *self.id.clone(),
+                "provider" : peer_id,
                 "resource": resource_name,
-                "provider": format!("{:?}", provider_addr),
-                "user": format!("{:?}", self.public_socket.local_addr().unwrap()),
                 "num_views": num_views,
                 "remaining": num_views,
-                "UUID": format!("grant:{:?}|{:?}|{}", provider_addr, self.public_socket.local_addr().unwrap(), resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
-            }).to_string();
+                "UUID": format!("req:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+            });
+            
             let params = vec!["permissions"];
-            let _ =  self.client.send_data_with_params(entry.as_bytes().to_vec(), "DeleteDocument", params.clone()).await.unwrap();
+            let _ =  self.client.send_data_with_params(entry.to_string().as_bytes().to_vec(), "DeleteDocument", params.clone()).await.unwrap();
 
             // Delete the encrypted resource file
             if let Err(e) = std::fs::remove_file(&file_path) {
@@ -725,17 +726,17 @@ impl Peer {
 
 
         // Update the remaining views in the directory of service
-        let entry = json!({
+        let entry = serde_json::json!({
             "type": "grant",
+            "user" : *self.id.clone(),
+            "provider" : peer_id,
             "resource": resource_name,
-            "provider": format!("{:?}", provider_addr),
-            "user": format!("{:?}", self.public_socket.local_addr().unwrap()),
             "num_views": num_views - 1,
             "remaining": num_views - 1,
-            "UUID": format!("grant:{:?}|{:?}|{}", provider_addr, self.public_socket.local_addr().unwrap(), resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
-        }).to_string(); 
+            "UUID": format!("req:{:?}|{:?}|{}", peer_id, self.id, resource_name), // provider, requester, resource name as an ID for the 'permissions' entries
+        });
         let params = vec!["permissions"];
-        let _ =  self.client.send_data_with_params(entry.as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
+        let _ =  self.client.send_data_with_params(entry.to_string().as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
 
         // Return the decrypted image data
         Ok(decrypted_data)
