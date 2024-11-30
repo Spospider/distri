@@ -85,6 +85,30 @@ fn parse_requests_or_grants(entries: Vec<Value>, entry_type: &str) -> Vec<(Strin
     result
 }
 
+fn parse_shared_images(entries: Vec<Value>) -> Vec<(String, String, usize)> {
+    let mut result = Vec::new();
+    for entry in entries {
+        if let Value::Object(map) = entry {
+            if let Some(Value::String(key_value)) = map.get("user") {
+                if let Some(Value::String(resource_name)) = map.get("resource") {
+                    if let Some(Value::Number(num_views)) = map.get("num_views") {
+                        if let Some(num_views) = num_views.as_u64() {
+                            // Add to result vector
+                            result.push((
+                                key_value.clone(),
+                                resource_name.clone(),
+                                num_views as usize,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
 fn clear_screen() {
     return;
     print!("\x1B[2J\x1B[H"); // ANSI escape codes to clear the screen and move the cursor to the top-left corner
@@ -96,6 +120,7 @@ fn render_ui(
     received_requests: &Vec<(String, String, usize)>,
     pending_requests: &Vec<(String, String, usize)>,
     granted_access: &HashMap<(String, String), usize>,
+    shared_images: &Vec<(String, String, usize)>,
 ) {
     clear_screen();
     println!("===== Peer-to-Peer Image Sharing =====\n");
@@ -104,6 +129,12 @@ fn render_ui(
     println!("Directory of Service:");
     for (user, images) in directory_of_service {
         println!("- {}: {:?}", user, images);
+    }
+
+    // Shared Images
+    println!("\nShared Images:");
+    for (user, image, views_left) in shared_images {
+        println!("- Shared with {}: Image: {}, Remaining Views: {}", user, image, views_left);
     }
 
     // Pending Requests
@@ -130,6 +161,7 @@ fn render_ui(
     println!("[2] Request Image");
     println!("[3] Accept/Reject Requests");
     println!("[4] View Image");
+    println!("[5] Update Shared Image Views");
     println!("[q] Quit");
     println!("\nEnter your choice:");
 }
@@ -170,12 +202,16 @@ pub async fn run_program(peer:&Arc<Peer>) {
             .into_iter()
             .map(|(provider, resource_name, num_views)| ((provider, resource_name), num_views))
             .collect();
+
+        let shared_imgs = peer.shared_images().await.clone();
+        let mut shared_images = parse_shared_images(shared_imgs);
     
         render_ui(
             &directory_of_service,
             &received_requests,
             &pending_requests,
             &granted_access,
+            &shared_images,
         );
 
         // Read user input
@@ -324,6 +360,45 @@ pub async fn run_program(peer:&Arc<Peer>) {
 
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
+            "5" => {
+                println!("Update Shared Image Views:");
+                
+                // Display all shared images
+                // for ((user, image), views_left) in &shared_images {
+                //     println!("- Shared with {}: Image: {}, Remaining Views: {}", user, image, views_left);
+                // }
+        
+                // Get user input for the update
+                println!("Enter the username of the recipient:");
+                let mut recipient = String::new();
+                io::stdin().read_line(&mut recipient).unwrap();
+                let recipient = recipient.trim().to_string();
+        
+                println!("Enter the image name:");
+                let mut image_name = String::new();
+                io::stdin().read_line(&mut image_name).unwrap();
+                let image_name = image_name.trim().to_string();
+        
+                println!("Enter the new number of remaining views:");
+                let mut views = String::new();
+                io::stdin().read_line(&mut views).unwrap();
+                let views = views.trim().parse::<usize>().unwrap_or(0);
+        
+                // Update the shared_images structure
+                // pending_requests.push((username, image_name, views));
+                match peer.update_permissions(recipient.as_str(), image_name.as_str(), views as u32).await {
+                    Ok(_) => {println!(
+                        "Updated remaining views for image '{}' shared with {}: {}",
+                        image_name, recipient, views
+                    );}
+                    Err(e) => {
+                        eprintln!("Error with request_resource {}", e);
+                    }
+                }
+                println!("Request sent.");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }        
+
             "q" => {
                 println!("Exiting...");
                 break;
