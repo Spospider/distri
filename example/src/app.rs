@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use distri::peer::Peer;
 use std::sync::Arc;
 
+// mod utils;
+use crate::utils::show_image;
+
 use serde_json::Value;
 
 fn parse_directory_of_service(directory: Vec<Value>) -> Vec<(String, Vec<String>)> {
@@ -297,17 +300,28 @@ pub async fn run_program(peer:&Arc<Peer>) {
                 io::stdin().read_line(&mut image_name).unwrap();
                 let image_name = image_name.trim().to_string();
 
-                let key = (username.clone(), image_name.clone());
-                if let Some(views_left) = granted_access.get_mut(&key) {
-                    if *views_left > 0 {
-                        *views_left -= 1;
-                        println!("Viewing image '{}' from '{}'.", image_name, username);
-                    } else {
-                        println!("No remaining views for this image.");
+                // let key = (username.clone(), image_name.clone());
+                // if let Some(views_left) = granted_access.get_mut(&key) {
+                //     if *views_left > 0 {
+                //         *views_left -= 1;
+                //         println!("Viewing image '{}' from '{}'.", image_name, username);
+                //     } else {
+                //         println!("No remaining views for this image.");
+                //     }
+                // } else {
+                //     println!("Access not granted for this image.");
+                // }
+                match peer.access_resource(&image_name.as_str(), &username.as_str()).await {
+                    Ok(decrypted_image) => {
+                        show_image(decrypted_image);
+                    },
+                    Err(e) => {
+                        eprintln!("Error decrypting image: {}", e);
+                        
                     }
-                } else {
-                    println!("Access not granted for this image.");
-                }
+                };
+                // show_image(decrypted_image);
+
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
             "q" => {
