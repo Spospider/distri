@@ -96,16 +96,16 @@ impl Peer {
         for item in &cloud_transactions {
             // check if types is request, and i am the provider
             // if item["type"].as_str() == Some("request") && item["provider"].as_str() == Some(format!("{:?}",self.public_socket.local_addr()).as_str()) {
-                if let Some(requester) = item["requester"].as_str() {
+                if let Some(user) = item["user"].as_str() {
                     let mut data = item.clone();
-                    data["requester"] = Value::String(requester.to_string());
+                    data["user"] = Value::String(user.to_string());
                     inbox.push(data);
                 }
             // }
         }
 
         // Get up to date with the cloud
-        let filter = json!({
+        let filter: Value = json!({
             "type" : "grant",
             "user" : *self.id.clone(),
         });
@@ -116,9 +116,10 @@ impl Peer {
             // if its a grant transaction and i am the user
             // if item["type"].as_str() == Some("grant") && item["user"].as_str() == Some(format!("{:?}",self.public_socket.local_addr()).as_str()) {
                 if let Some(peer_id) = item["provider"].as_str() {
-                    if let Some(resource_name) = item["resource_name"].as_str() {
+                    if let Some(resource_name) = item["resource"].as_str() {
                         if let Some(num_views) = item["num_views"].as_u64() {
                             // request it from peer again
+                            // check if 
                             self.request_resource(peer_id, resource_name, num_views as u32).await.unwrap_or_default();
                             // peer should then send a grant resource
                         }
@@ -136,6 +137,9 @@ impl Peer {
         tokio::spawn(async move {
             loop {
                 println!("looping");
+                println!("pending_approval: {:?}", serve_self.pending_approval.lock().await);
+                println!("inbox_queue: {:?}", serve_self.inbox_queue.lock().await);
+                println!("available_resources: {:?}", serve_self.available_resources.lock().await);
                 let mut buffer: Vec<u8> = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
                 let (size, addr) = match recv_with_timeout(&serve_self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                     Ok((size, addr)) => (size, addr), // Successfully received data
@@ -172,7 +176,7 @@ impl Peer {
     async fn handle_request_msg(self: &Arc<Self>, addr:SocketAddr, json_obj:Value) {
         // Add to inbox list
         let data = json_obj.clone();
-        let resource_name = data["resource_name"].as_str().unwrap_or("NULL");
+        let resource_name = data["resource"].as_str().unwrap_or("NULL");
         // check if request has been granted before from DOS, and grant automatically if so.
         let peer_id = json_obj["user"].as_str().expect("failed to parse userid");
         let filter = json!({
@@ -529,20 +533,44 @@ impl Peer {
         // tokio::spawn(async move {
             let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
 
-            // update directory of service with this permission grant
-            let entry = json!({
-                "type": "grant",
-                "resource": resource_n,
-                "provider": *myself.id.clone(),
-                "user": peer_id_,
-                "num_views": num_views,
-                "remaining": num_views,
+            // check if grant entry is in DOS firrst, if so dont push it
+            let filter = json!({
                 "UUID": format!("grant:{:?}|{:?}|{}", myself.id, peer_id_, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
             }).to_string();
             let params = vec!["permissions"];
-            println!("grant_resource4");
-            
-            let _ =  myself.client.send_data_with_params(entry.as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
+            let entry: Vec<u8> =  myself.client.send_data_with_params(filter.as_bytes().to_vec(), "ReadCollection", params.clone()).await.unwrap();
+            // convert to json and check if the json list result is empty or not
+            let json_result: Value = serde_json::from_slice(&entry).unwrap();
+            // let mut exist:bool = false;
+            let mut entry:String = "".to_string();
+            if let Some(json_array) = json_result.as_array() {
+                if json_array.is_empty() {
+                    println!("The JSON array is empty.");
+                } else {
+                    // exist = true;
+                    entry = json_array[0].to_string();
+                    println!("The JSON array is not empty.");
+                }
+            } else {
+                println!("The response is not a JSON array.");
+            }
+
+            // update directory of service with this permission grant
+            if entry.as_str() == "" {
+                entry = json!({
+                    "type": "grant",
+                    "resource": resource_n,
+                    "provider": *myself.id.clone(),
+                    "user": peer_id_,
+                    "num_views": num_views,
+                    "remaining": num_views,
+                    "UUID": format!("grant:{:?}|{:?}|{}", myself.id, peer_id_, resource_n), // provider, requester, resource name as an ID for the 'permissions' entries
+                }).to_string();
+                let params = vec!["permissions"];
+                println!("grant_resource4");
+                
+                let _ =  myself.client.send_data_with_params(entry.clone().as_bytes().to_vec(), "UpdateDocument", params.clone()).await.unwrap();
+            }
 
             // pop from local inbox, based on user and resource_name
             let mut inbox = myself.inbox_queue.lock().await;
@@ -553,7 +581,7 @@ impl Peer {
 
             // send grant message  to peer to exchange data 
             println!("sending grant resource to {}", myself.resolve_id(peer_id_.as_str()).await.unwrap());
-            let _ = match send_with_retry(&socket, entry.as_bytes(), myself.resolve_id(peer_id_.as_str()).await.expect("Failed grant address resolve"), MAX_RETRIES).await {
+            let _ = match send_with_retry(&socket, entry.clone().as_bytes(), myself.resolve_id(peer_id_.as_str()).await.expect("Failed grant address resolve"), MAX_RETRIES).await {
                 Ok(()) => (), // Successfully received data
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     // unreachable peer
