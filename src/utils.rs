@@ -11,6 +11,12 @@ use std::io;
 use std::collections::HashMap;
 use regex::Regex;
 
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
+use pixels::{Pixels, SurfaceTexture};
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
@@ -325,3 +331,44 @@ pub fn extract_variable(input: &str) -> Result<String, io::Error> {
     }
 }
 
+
+pub fn show_image(image_data: Vec<u8>) -> Result<(), Box<dyn Error>> {
+    // Decode the image data
+    let img = image::load_from_memory(&image_data)?;
+    let img = img.to_rgba8(); // Convert to RGBA format
+    let (width, height) = img.dimensions();
+
+    // Create a window
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("Image Viewer")
+        .with_inner_size(winit::dpi::LogicalSize::new(width, height))
+        .build(&event_loop)?;
+
+    // Create a pixels surface
+    let surface_texture = SurfaceTexture::new(width, height, &window);
+    let mut pixels = Pixels::new(width, height, surface_texture)?;
+
+    // Copy the image data into the pixel buffer
+    let frame = pixels.frame_mut();
+    frame.copy_from_slice(&img.into_raw());
+
+
+    // Run the event loop
+    event_loop.run(move |event, _, control_flow| {
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit, // Close the window
+            Event::RedrawRequested(_) => {
+                if pixels.render().is_err() {
+                    eprintln!("Failed to render image");
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            _ => (),
+        }
+        window.request_redraw();
+    });
+}
