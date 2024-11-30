@@ -235,12 +235,12 @@ pub async fn run_program(peer:&Arc<Peer>) {
 
                         match decision.trim() {
                             "a" => {
-                                peer.grant_resource(from_user, image, views);
+                                peer.grant_resource(from_user, image, *views as u32).await;
                                 // granted_access.insert((from_user.to_string(), image.to_string()), *views);
                                 println!("Accepted request!");
                             }
                             "r" => {
-                                peer.grant_resource(from_user, image, 0);
+                                peer.grant_resource(from_user, image, 0).await;
                                 println!("Rejected request!");
                             }
                             "u" => {
@@ -248,7 +248,7 @@ pub async fn run_program(peer:&Arc<Peer>) {
                                 let mut updated_views = String::new();
                                 io::stdin().read_line(&mut updated_views).unwrap();
                                 if let Ok(new_views) = updated_views.trim().parse::<usize>() {
-                                    peer.grant_resource(from_user, image, updated_views);
+                                    peer.grant_resource(from_user, image, new_views as  u32).await;
                                     // granted_access.insert((from_user.to_string(), image.to_string()), new_views);
                                     println!(
                                         "Accepted request with updated views: {}",
