@@ -1,5 +1,5 @@
 # Distri
-A Rust framework designed for distributed computing, focusing on both distributed cloud (client-service architecture) and peer-to-peer networking (to be implemented). The framework aims to provide a robust, high-performance, and fault-tolerant solution for building distributed applications with ease.
+A Rust framework designed for distributed computing, focusing on both distributed cloud (client-service architecture) and peer-to-peer networking. The framework aims to provide a robust, high-performance, and fault-tolerant solution for building distributed applications with ease.
 
 
 ## Service Components
@@ -55,47 +55,12 @@ The Client acts as the communication module to the distriibuted service. Data go
 - **collect_stats**()
     Performs stats request to all servers and prints each response.
 
-### Peer (TODO)
+### Peer (TODO Write this part)
 \*The peer class should utilise the client for communication with the cloud. The main purpose of the peer is to communicate with other peers.
 
 ### Usage Philosophy
 All extra logic should be impemented in the main program , the serves should just server, aclients should just be used for communication at the byte level, any processing, decryption etc. should be outside of the client and in the main
 
-
-### TODO
-Phase 1: **DONE**
-- CMD args for ip tables
-- Tolerate failure during handle_connection()
-- Usecase on different machines
-
-Phase 2: **(CURRENT)**
-- In cloudnode, make file naming unique per socket, add hash prefix to filenames.
-- Figure out why Stegnography decryption sometimes fails, maybe add retry feature, or handle the error and count it in failures.
-- **Distributed DB:**
-    - Add new services to CloudNode for the Directory of service. (Adding data + reading data, in different tables defined by the cloudnode init, JSON formatted) **Ali   (DONE)**
-    - Figure out syncing the nodes tables (for election conherency, in case a new node joins in & for the Distributed Database) **Ali (DONE)** 
-- **Peer-to-Peer System:**
-**Fekry**
-    - Publishing to Directory of service on startup and periodically through resources being in a particular folder (this will be in example) (contents in folder are auto-published resources)
-    - Fetching from directory of service & displaying the list of images, and their owners.
-    - Implement adding a metadata block (containing permissions) to images sent by peers, and reading them correctly (be able to separate image date from metadata).
-    - Implement requesting and receiving data from peer, storing them encrypted as they are in a separate folder called "borrowed". requests re through unique ids composed of peer IP+port + img_name
-    - Implementing in-memory decryption & image viewing in the example application with permission checks.
-    - periodic checking of the directory of service + on startup, and invalidating any images accordingly (deleting them from borrowed).
-    - Peers keep track of who has access to what for how long, and this is published on the directory of service as well.
-    - Implement a waitlist functionality for requests to image owners that are unreachable, periodical requests to that peer until they are reached, then these requests are popped from that waitlist.
-    - The number of views should be tracked, with each published permission,so that when peers shut down or come back the data is synced, a local copy is also stored for consistency. 
-    - **Interface**:
-        - Listing available resources from the DOS.
-        - Selecting one or multiple images to request access to from peer.
-        - List peer's own images and images they have access to as sort of 2 sections. (Main menu)
-        - Image viewer: being able to view the images (decrypted in-mem).
-        - Allow changing of permissions of published images through the interface.
-        - Menu for seeing inbox of incoming requests, you can grant requests, and modify the number of requests.
-        - interface should not wait for anything, **its always interactive everything else in separate threads**, maybe show the waitlist for on-going requests. 
-    - Adding the peer option to the Example file, to create a peer and start the interface, all interface logic will be in the example program, **peer is a middleware**.
-
-**Defining image permissions**: number of image views, how many times the image can be viewed.
 
 
 
@@ -158,8 +123,6 @@ cargo run -- --mode server --ips 127.0.0.1:3001,127.0.0.1:3000
 
 
 ## Future Work
-
-•	**Peer-to-Peer Networking**: Implement support for decentralized peer-to-peer communication to enhance the framework’s capabilities.
 •	**Enhanced Documentation**: Expand the documentation with more examples and use cases.
 •	**Performance Optimizations**: Continuously evaluate and improve the performance of the framework.
 •	**Enhanced Customizability**: Better support for seamless integrations with user functions and applications.
