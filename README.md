@@ -126,3 +126,66 @@ cargo run -- --mode server --ips 127.0.0.1:3001,127.0.0.1:3000
 •	**Enhanced Documentation**: Expand the documentation with more examples and use cases.
 •	**Performance Optimizations**: Continuously evaluate and improve the performance of the framework.
 •	**Enhanced Customizability**: Better support for seamless integrations with user functions and applications.
+
+
+
+load balancing test:
+```
+Server Stats:
+Requests Recieved: 25000
+Accepted Requests: 5410
+Completed Tasks: 5123
+Server Fails: 0
+Total Task Time: 662724.08s
+Avg Completion Time: 129.36s
+
+            DB Data: catalog: 0 entries, permissions: 0 entries, users: 0 entries
+
+Received response from 127.0.0.1:60517: Server Stats:
+Requests Recieved: 24998
+Accepted Requests: 6274
+Completed Tasks: 5973
+Server Fails: 0
+Total Task Time: 681306.92s
+Avg Completion Time: 114.06s
+
+            DB Data: catalog: 0 entries, permissions: 0 entries, users: 0 entries
+
+Received response from 127.0.0.1:55830: Server Stats:
+Requests Recieved: 24999
+Accepted Requests: 5954
+Completed Tasks: 5693
+Server Fails: 0
+Total Task Time: 629499.79s
+Avg Completion Time: 110.57s
+
+            DB Data: catalog: 0 entries, permissions: 0 entries, users: 0 entries
+
+Received response from 127.0.0.1:64258: Server Stats:
+Requests Recieved: 25000
+Accepted Requests: 4958
+Completed Tasks: 4701
+Server Fails: 0
+Total Task Time: 602779.53s
+Avg Completion Time: 128.22s
+
+            DB Data: catalog: 0 entries, permissions: 0 entries, users: 0 entries
+
+Test completed: Total failed tasks: 2475
+Avg response time: 112.24516040772448
+```
+
+Comments on Encrypt test:
+- each client does 10 encryption tasks sequentially
+- Significant failures start to occur once we surpass 5 servers, as by the nature of our election algorithm, all nodes that receive a request respond with ok, only one will be connected (the first one that responds). and at the same time, in our code, we have a checking mechanism in receiving packets, where if the sender is not the expected sender, it waits for another message, but this only happens until the max number of retries is exhausted (in recv_reliable). once all retries are exhaused, an error is raised. but since there are more servers that number of retries, its possible that the expected packet arrives after a number of "OK"s that surpasses the max retry count. the tests are shoter because of this, as in this case the error is not a timeout error.
+
+- Other errors are due to timeouts in responses. its important to balance the targetted response time, timeouts, and number of servers.
+
+
+Comments on DB test:
+- the test is made of 4 sequential DB operations: AddDoc, ReadDoc, UpdateDoc, ReadDoc.
+- to improve db response times, an update time is employed, where the nodes are not allowed to sync for a small period of time after an update, to reduce communication overhead. One node (the last one elected as having the latest data) is the one who's gonna do all BD requests for that period of time.
+- but the elected value does eventually get out of sync, and other nodes modify their version of the db.
+- when they do sync, the one with the latest DB version overwrites the other, thus this is why the number of entries is less than expected when there are multiple cloudnodes.
+- Future work to solve this is to have Db sycn throuhg merging instead of overwriting. and also through enhancing the sync by instead of dumping all DB data in the response, it sends the UUIDs it has, the other node then checks and they only exchance data they don't have.
+- However in cases where there is no tight data operations our system proves functional and in sync.
