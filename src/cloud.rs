@@ -2,6 +2,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Error, ErrorKind};
+use tokio::time::sleep;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -50,6 +51,7 @@ pub struct CloudNode {
     // Distributed DB 
     collections: Arc<Mutex<HashMap<String, Vec<Value>>>>,
     db_data_version: Arc<Mutex<u32>>,
+    time_to_update: Arc<Mutex<bool>>,
     
 }
 
@@ -109,6 +111,7 @@ impl CloudNode {
             // Distributed DB
             collections: Arc::new(Mutex::new(collections)),
             db_data_version: Arc::new(Mutex::new(0)),
+            time_to_update: Arc::new(Mutex::new(true)),
         }))
     }
 
@@ -119,11 +122,13 @@ impl CloudNode {
         // initialize request queue, multi-sender, multi receiver.
         // let (tx, mut rx) = mpsc::channel(1000);
         let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let internal_queue = Arc::new(Mutex::new(VecDeque::new()));
         let num_workers = self.num_workers.lock().await.clone();
 
         // main receiving layer thread
         let recv_self = self.clone();
         let recv_queue = queue.clone();
+        let internal_queue1 = internal_queue.clone();
         tokio::spawn(async move {
             loop {
                 println!("looping1");
@@ -183,12 +188,63 @@ impl CloudNode {
                 let received_msg: String = String::from_utf8_lossy(&packet).into_owned();
 
                 // Send to queue
-                recv_queue.lock().await.push_back((received_msg, addr, Instant::now()));
+                if received_msg == "Request: UpdateInfo" {
+                    internal_queue1.lock().await.push_back((received_msg, addr, Instant::now()));
+                }
+                else {
+                    recv_queue.lock().await.push_back((received_msg, addr, Instant::now()));
+                }
+                
                 // if tx.send((received_msg, addr)).await.is_err() {
                 //     eprintln!("Receiver task: failed to send to processing queue.");
                 // }
                 println!("looping5");
             }
+        });
+
+        // thread for cloud internal communication
+        let proc_self = self.clone();
+        let int_queue: Arc<Mutex<VecDeque<(String, SocketAddr, Instant)>>> = internal_queue.clone();
+
+        tokio::spawn(async move {
+            loop {
+                // Pop from queue
+                let (received_msg, addr, recv_time) = match int_queue.lock().await.pop_back() {
+                    Some((received_msg, addr, recv_time)) => (received_msg, addr, recv_time),
+                    None => {
+                        continue;
+                    },
+                };
+
+                // Drop old requests, focus on ones the clients are still waiting on
+                if recv_time.elapsed() > Duration::from_secs(DEFAULT_TIMEOUT) || received_msg != "Request: UpdateInfo"{
+                    continue;
+                }                
+
+                // Stats msgs and updateInfo msgs pass directly
+                let node = proc_self.clone();
+                if received_msg == "Request: Stats"  {
+                    // Spawn a task to handle the connection and data processing
+                    tokio::spawn(async move {
+                        // let start_time = Instant::now(); // Record start time
+                        if let Err(e) = node.handle_stats(addr).await {
+                            eprintln!("Error handling Stats: {:?}", e);
+                        }
+                        else{
+                            println!("Stats Done for {}", addr);
+                        }
+
+                    });
+                    
+                }
+                else if received_msg == "Request: UpdateInfo" {
+                    println!("received UpdateInfo");
+                    if let Err(e) = proc_self.handle_info_request(addr).await {
+                        eprintln!("Error handling UpdateInfo: {:?}", e);
+                    }
+                }
+            }
+            
         });
 
         // main receiving layer thread
@@ -228,7 +284,7 @@ impl CloudNode {
                     }
 
                     // Stats msgs and updateInfo msgs pass directly
-                    if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || *proc_self.elected.lock().await { // only if elected, or its a stats request
+                    if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || proc_self.elected.lock().await.clone() { // only if elected, or its a stats request
                         println!("Handling something");
                         let node = proc_self.clone();
                         if received_msg == "Request: Encrypt"  {
@@ -277,40 +333,55 @@ impl CloudNode {
                             if let Err(e) = proc_self.db_add_table(addr).await {
                                 eprintln!("Error handling add table service: {:?}", e);
                             } else {
+                                *proc_self.completed.lock().await += 1;
                                 println!("AddCollection Done for {}", addr);
                             }
                         }
                         else if received_msg.starts_with("Request: AddDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                            let start_time = Instant::now();
                             if let Err(e) = proc_self.db_add_entry(&received_msg.clone(), addr).await {
                                 eprintln!("Error handling add doc service: {:?}", e);
                             } else {
                                 println!("AddDocument Done for {}", addr);
+                                let elapsed: Duration = start_time.elapsed();
+                                *proc_self.completed.lock().await += 1;
+                                *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
                             }
                         }
                         else if received_msg.starts_with("Request: UpdateDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                            let start_time = Instant::now();
                             if let Err(e) = proc_self.db_update_entry(&received_msg.clone(), addr).await {
                                 eprintln!("Error handling update doc service: {:?}", e);
                             } else {
                                 println!("UpdateDocument Done for {}", addr);
+                                let elapsed: Duration = start_time.elapsed();
+                                *proc_self.completed.lock().await += 1;
+                                *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
+
                             }
                         }
                         else if received_msg.starts_with("Request: DeleteDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                            let start_time = Instant::now();
                             if let Err(e) = proc_self.db_delete_entry(&received_msg.clone(), addr).await {
                                 eprintln!("Error handling delete doc service: {:?}", e);
                             } else {
                                 println!("DeleteDocument Done for {}", addr);
+                                let elapsed: Duration = start_time.elapsed();
+                                *proc_self.completed.lock().await += 1;
+                                *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
                             }
                         }
                         else if received_msg.starts_with("Request: ReadCollection") { // only check the first part of "Request: ReadCollection<tablename>"
                             tokio::spawn(async move {
-                                // let start_time = Instant::now(); // Record start time
+                                let start_time = Instant::now(); // Record start time
                                 if let Err(e) = node.db_read_table(&received_msg.clone(), addr).await {
                                     eprintln!("Error handling read table service: {:?}", e);
                                 }
                                 else{
                                     println!("ReadCollection Done for {}", addr);
+                                    let elapsed: Duration = start_time.elapsed();
+                                    *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
                                 }
-
                             });
                         }
                     }
@@ -341,17 +412,11 @@ impl CloudNode {
                 continue;
             }
             let request_msg: &str = "Request: UpdateInfo";
-            // println!("{} {}", "sending getinfo to".yellow(), addr);
     
             // Send the request to the node
             send_with_retry(&socket, request_msg.as_bytes(), addr, 10).await.unwrap();
-            // println!("{}", "sent UpdateInfo".yellow());
-    
-            // Buffer to hold the response
-            // let mut buffer = [0u8; 1024];
             
             // Receive the response from the node
-             // REPLACE with recv_reliable
             // match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
             let _ = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, _)) => {
@@ -447,8 +512,13 @@ impl CloudNode {
     async fn elect_leader(self: &Arc<Self>, for_db:Option<bool>) {
         println!("{}", "elect_leader1".yellow());
         let mut elected = self.elected.lock().await;
+        if !self.time_to_update.lock().await.clone() {
+            println!("{} {}", "skipped election".yellow(), elected);
+            return;
+        }
+        *self.time_to_update.lock().await = false;
         println!("elected locked");
-
+        
         // elected = true if there are no known neighbors
         if self.nodes.lock().await.is_empty() {
             *elected = true;
@@ -464,6 +534,13 @@ impl CloudNode {
         *elected = self.election_alg(for_db).await; // Elect a leader based on load and id values
         println!("{} {}","elected value:".yellow(), elected);
         // *self.electing.lock().await = false;
+        let ttu = Arc::clone(&self.time_to_update);
+        tokio::spawn(
+            async move {
+            // Sleep for 5 seconds
+            sleep(Duration::from_secs(1)).await;
+            *ttu.lock().await = true;
+        });
     }
 
     async fn election_alg(self: &Arc<Self>, for_db:Option<bool>) -> bool {
@@ -518,7 +595,7 @@ impl CloudNode {
         send_with_retry(&socket, b"OK", addr, 5).await?;
         println!("Sent 'OK' message for Encrypt to {}", addr);
 
-        let (aggregated_data, _, _) = recv_reliable(&socket, Some(Duration::from_secs(1))).await?;
+        let (aggregated_data, _, _) = recv_reliable(&socket, Some(Duration::from_secs(5))).await?;
         // Increment accepted
         *self.accepted.lock().await += 1;
 
@@ -626,7 +703,7 @@ impl CloudNode {
         // receive data
         // Loop to ensure we get data from the correct client
         for _ in 0..5 {
-            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
+            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     // Successfully received data from the correct client
                     let table_name: &str = &String::from_utf8_lossy(&packet);
@@ -678,7 +755,7 @@ impl CloudNode {
         // recieve data
         // Loop to ensure we get data from the correct client
         for _ in 0..5 {
-            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
+            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     println!("done recieving");
                     let packet = packet[..size].to_vec();
@@ -759,7 +836,7 @@ impl CloudNode {
         // Receive data
         // Loop to ensure we get data from the correct client
         for _ in 0..5 {
-            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
+            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     println!("Done receiving");
                     let packet = packet[..size].to_vec();

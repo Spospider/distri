@@ -56,11 +56,11 @@ impl Client {
             // match socket.send_to(request_message.as_bytes(), &node_addr).await {
             match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
                 Ok(_) => {
-                    println!("Request message sent to {}", node_addr);
+                    // println!("Request message sent to {}", node_addr);
                 }
                 Err(e) => {
                     // this doesnt
-                    eprintln!("Failed to send message to {}: {:?}", node_addr, e);
+                    // eprintln!("Failed to send message to {}: {:?}", node_addr, e);
                 }
             }
         }
@@ -74,7 +74,7 @@ impl Client {
         let response = String::from_utf8_lossy(&buffer[..size]);
         if !data.is_empty(){
             if response == "OK" {
-                println!("request for service accepted from {}", addr);
+                // println!("request for service accepted from {}", addr);
 
                 send_reliable(&socket, &data, addr).await?;
 
@@ -111,10 +111,10 @@ impl Client {
             // Send the request message with retries
             match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
                 Ok(_) => {
-                    println!("Request message sent to {}", node_addr);
+                    // println!("Request message sent to {}", node_addr);
                 }
                 Err(e) => {
-                    eprintln!("Failed to send message to {}: {:?}", node_addr, e);
+                    // eprintln!("Failed to send message to {}: {:?}", node_addr, e);
                 }
             }
         }
@@ -129,7 +129,7 @@ impl Client {
         
         // if there is data to send, expect Ok message first
         if response == "OK" {
-            println!("Request for service accepted from {}", addr);
+            // println!("Request for service accepted from {}", addr);
         
             if !data.is_empty(){
                 // Send the file data reliably
@@ -158,10 +158,10 @@ impl Client {
             // match socket.send_to(request_message.as_bytes(), &node_addr).await {
             match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
                 Ok(_) => {
-                    println!("Stats request sent to {}", node_addr);
+                    // println!("Stats request sent to {}", node_addr);
                 }
                 Err(e) => {
-                    eprintln!("Failed to send stats request to {}: {:?}", node_addr, e);
+                    // eprintln!("Failed to send stats request to {}: {:?}", node_addr, e);
                     continue;
                 }
             }
@@ -197,7 +197,7 @@ impl Client {
 
     async fn await_result(&self, socket:UdpSocket, sender: SocketAddr) -> Result<Vec<u8>, std::io::Error>  {
         // println!("receiving on {:?}", socket.local_addr().unwrap());
-        let (data, _, addr) = recv_reliable(&socket, None).await.unwrap(); // Adjust for proper error handling if necessary.
+        let (data, _, addr) = recv_reliable(&socket, None).await?; // Adjust for proper error handling if necessary.
         if addr != sender {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,

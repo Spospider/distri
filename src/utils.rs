@@ -36,7 +36,7 @@ use pixels::{Pixels, SurfaceTexture};
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
 pub const DEFAULT_TIMEOUT: u64 = 15; // in seconds
-pub const RETRY_INTERVAL: u64 = 1; // in seconds
+pub const RETRY_INTERVAL:Duration = Duration::from_millis(1000); // in seconds
 
 pub const CHUNK_SIZE: usize = 1024; // in seconds
 pub const MAX_RETRIES: u8 = 5;
@@ -82,6 +82,7 @@ pub async fn server_decrypt_img(base_img_path: &str, output_hidden_img_path: &st
     Ok(())
 }
 pub async fn write_to_file(file_path: &str, data: &[u8]) -> Result<(), std::io::Error> {
+    return Ok(());
     match File::create(file_path).await {
         Ok(mut file) => {
             file.write_all(data).await?;
@@ -181,15 +182,13 @@ pub async fn send_with_retry(socket: &UdpSocket, message: &[u8], addr: SocketAdd
         
         match socket.send_to(message, addr).await {
             Ok(_) => {
-                // Successfully sent the message
-                // println!("Successfully sent message to {} on attempt {}", addr, attempts);
                 return Ok(());
             },
             Err(e) => {
                 eprintln!("Failed to send message to {}: {:?} (attempt {}/{})", addr, e, attempts, max_retries);
                 if attempts < max_retries {
                     // Wait a bit before retrying
-                    sleep(Duration::from_secs(RETRY_INTERVAL)).await;
+                    sleep(RETRY_INTERVAL).await;
                 } else {
                     // Exhausted retries, return the error
                     return Err(e);
@@ -256,10 +255,16 @@ pub async fn send_reliable(
                     }
                 }
                 Ok(_) => {
-                    // Received a packet, but it's not the correct ACK or from an unexpected source
-                    eprintln!("Received unexpected packet, ignoring.");
+                    // Received a packet, but it's not the correct ACK or from an unexpected source, skip
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
+                    if attempts < MAX_RETRIES {
+                        // Wait a bit before retrying
+                        sleep(RETRY_INTERVAL).await;
+                    } else {
+                        // Exhausted retries, break out
+                        break;
+                    } 
                     eprintln!("Timeout waiting for ACK for sequence number {}", sequence_number);
                 }
                 Err(e) => {
@@ -297,7 +302,7 @@ pub async fn recv_reliable(socket: &UdpSocket, duration:Option<Duration>) -> Res
     let mut received_data: HashMap<u64, Vec<u8>> = HashMap::new(); // Store received chunks by sequence number
     let mut expected_sequence_number = 0u64;
     let mut address:SocketAddr;
-    println!("Start recv chunks");
+    // println!("Start recv chunks");
 
     loop {
         let mut buffer = vec![0u8; CHUNK_SIZE + 8]; // Buffer to receive chunk + sequence number

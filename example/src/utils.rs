@@ -109,6 +109,7 @@ pub async fn decrypt_image(input_path: &str, output_path: &str) -> Result<(), st
 }
 
 pub async fn write_to_file(file_path: &str, data: &[u8]) -> Result<(), std::io::Error> {
+    return Ok(());
     match File::create(file_path).await {
         Ok(mut file) => {
             file.write_all(data).await?;

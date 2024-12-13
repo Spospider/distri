@@ -13,6 +13,9 @@ use serde_json::{to_vec, Value, json};
 
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use tokio::sync::Barrier;
+use std::process::{Command, Child};
+
 
 use show_image::*;
 
@@ -33,11 +36,19 @@ struct Arguments {
     report: bool,
     #[arg(long, value_delimiter = ',')]
     ips: Vec<String>,
+
+    #[arg(long, default_value_t = 1)]
+    n: usize, 
+
+    #[arg(long, default_value_t = 1)]
+    n_servers: usize, 
 }
 
 #[show_image::main]
 #[tokio::main]
 async fn main() {
+    let base_ip = "127.0.0.1".to_string();
+    let start_port = 3000;
     let args = Arguments::parse();
     
     let mode = args.mode;
@@ -49,8 +60,6 @@ async fn main() {
         .map(|ip| ip.parse().expect("Failed to parse an IP address")) // Parse each unique String to SocketAddr
         .collect(); // Collect the results into a Vec<SocketAddr>
 
-    let own_addr:SocketAddr = args.ips[0].parse().expect("Failed to parse an Socket address");
-
     match mode.as_str() {
         "server" => {
             // Server Mode
@@ -61,6 +70,7 @@ async fn main() {
             for (_, addr) in other_ips.iter().enumerate() {
                 node_map.insert(addr.port().to_string(), *addr);
             }
+            let own_addr:SocketAddr = args.ips[0].parse().expect("Failed to parse an Socket address");
 
             // define DB tables for directory of service
             let table_names = Some(vec!["catalog", "permissions", "users"]);
@@ -186,6 +196,7 @@ async fn main() {
         "peer" => {
             // Server Mode
             let identifier = args.identifier.expect("No identifier was specified, use the --identifier arg.");
+            let own_addr:SocketAddr = args.ips[0].parse().expect("Failed to parse an Socket address");
 
             // Initialize server and other nodes in the network
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
@@ -198,9 +209,12 @@ async fn main() {
             run_program(&peer).await;
             
         }
+        
+
         _ => {
-            eprintln!("Invalid mode specified. Use 'server' or 'client'.");
+            eprintln!("Invalid mode specified. Use 'server', or 'client'.");
         }
+    
     }
 }
 
