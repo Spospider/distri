@@ -512,7 +512,7 @@ impl CloudNode {
     async fn elect_leader(self: &Arc<Self>, for_db:Option<bool>) {
         println!("{}", "elect_leader1".yellow());
         let mut elected = self.elected.lock().await;
-        if !self.time_to_update.lock().await.clone() {
+        if !self.time_to_update.lock().await.clone() && self.db_data_version.lock().await.clone() > 0 {
             println!("{} {}", "skipped election".yellow(), elected);
             return;
         }
