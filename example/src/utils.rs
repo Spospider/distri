@@ -4,14 +4,6 @@ use std::error::Error;
 use steganography::decoder::*;
 use steganography::util::*;
 
-use pixels::{Pixels, SurfaceTexture};
-// use winit::{
-//     dpi::LogicalSize,
-//     event::{Event, WindowEvent},
-//     event_loop::{ControlFlow, EventLoop},
-//     platform::run_return::EventLoopExtRunReturn,
-//     window::WindowBuilder,
-// };
 use image::GenericImageView;
 
 

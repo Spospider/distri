@@ -31,7 +31,7 @@ use winit::{
     window::WindowBuilder,
     platform::run_return::EventLoopExtRunReturn
 };
-use pixels::{Pixels, SurfaceTexture};
+// use pixels::{Pixels, SurfaceTexture};
 
 
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
@@ -378,52 +378,4 @@ pub fn extract_variable(input: &str) -> Result<String, io::Error> {
     } else {
         Err(io::Error::new(io::ErrorKind::Other, "No variable supplied"))
     }
-}
-
-
-pub fn show_image(image_data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-    // Decode the image data
-    let img = image::load_from_memory(&image_data)?;
-    let img = img.to_rgba8(); // Convert to RGBA format
-    let (width, height) = img.dimensions();
-
-    // Create a window
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Image Viewer")
-        .with_inner_size(winit::dpi::LogicalSize::new(width, height))
-        .build(&event_loop)?;
-
-    // Create a pixels surface
-    let surface_texture = SurfaceTexture::new(width, height, &window);
-    let mut pixels = Pixels::new(width, height, surface_texture)?;
-
-    // Copy the image data into the pixel buffer
-    let frame = pixels.frame_mut();
-    frame.copy_from_slice(&img.into_raw());
-
-    // Run the event loop with `run_return`
-    let mut event_loop = EventLoop::new();
-    event_loop.run_return(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait; // Ensure the loop doesn't block indefinitely
-
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                *control_flow = ControlFlow::Exit; // Exit the event loop
-            }
-            Event::RedrawRequested(_) => {
-                if pixels.render().is_err() {
-                    eprintln!("Failed to render image");
-                    *control_flow = ControlFlow::Exit;
-                }
-            }
-            _ => (),
-        }
-        window.request_redraw();
-    });
-
-    Ok(())
 }
