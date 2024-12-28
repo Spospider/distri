@@ -11,13 +11,13 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use std::io::Result;
 use std::time::{Duration, Instant};
-use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable, extract_variable};
 use rand::Rng; 
 use serde_json::{json, Value, to_string};
 use colored::*; // Import the trait for coloring
 use uuid::Uuid;
 
-
+use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable, extract_variable};
+use crate::service::Service;
 
 
 #[derive(Clone)]
@@ -38,7 +38,6 @@ pub struct CloudNode {
     load: Arc<Mutex<i32>>,
     id: Arc<Mutex<u16>>, // is the port of the addr, server ports have to be unique
     num_workers: Arc<Mutex<u32>>,
-    // internal_socket: Arc<UdpSocket>,
     
     // For stats
     requests:Arc<Mutex<u32>>,
@@ -53,11 +52,13 @@ pub struct CloudNode {
     db_data_version: Arc<Mutex<u32>>,
     time_to_update: Arc<Mutex<bool>>,
     
+    services: Vec<Box<dyn Service>>,
 }
 
 impl CloudNode {
     /// Creates a new CloudNode
     pub async fn new(
+        services: Vec<Box<dyn Service>>,
         num_workers:u32,
         address: SocketAddr,
         nodes: Option<HashMap<String, SocketAddr>>,
@@ -112,6 +113,8 @@ impl CloudNode {
             collections: Arc::new(Mutex::new(collections)),
             db_data_version: Arc::new(Mutex::new(0)),
             time_to_update: Arc::new(Mutex::new(true)),
+
+            services,
         }))
     }
 
@@ -267,6 +270,8 @@ impl CloudNode {
                     if recv_time.elapsed() > Duration::from_secs(DEFAULT_TIMEOUT) {
                         continue;
                     }
+
+                    let service_name = received_msg.split_whitespace().nth(1).unwrap_or("");
 
                     // Avoid infinite electing, only elect for public services
                     if received_msg != "Request: Stats"  && received_msg != "Request: UpdateInfo" {

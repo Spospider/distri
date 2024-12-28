@@ -34,6 +34,9 @@ CloudNodes also hold their own NoSQL in-memory DB. its not designed for holding 
     Used to add a new Collection to the DB, given data of the Collection name as string.
 - "**Request: AddDocument<*collection_name*>**"
     Used to add a new document to a collection in the DB, given the parameter collection_name.
+- "**Request: UpdateDocument<*collection_name*>**"
+    Used to update an existing document to a collection in the DB, given the parameter collection_name, and a json that will be matched with the target entry. if no entry is found, a new entry is added from the given json anyway.
+
 - "**Request: DeleteDocument<*collection_name*>**"
     Delete document from a collection in the DB, given the parameter collection_name, given data of a JSON-String of attributes and values to exact-match on.
     > ***TODO**: range params*
@@ -42,6 +45,7 @@ CloudNodes also hold their own NoSQL in-memory DB. its not designed for holding 
     > ***TODO** Pagination*
 
 > ***TODO** DeleteCollection*
+
 
 ### Client
 The Client acts as the communication module to the distriibuted service. Data going in and out of the client is going to be in the format of bytes.
@@ -55,8 +59,29 @@ The Client acts as the communication module to the distriibuted service. Data go
 - **collect_stats**()
     Performs stats request to all servers and prints each response.
 
-### Peer (TODO Write this part)
-\*The peer class should utilise the client for communication with the cloud. The main purpose of the peer is to communicate with other peers.
+### Peer
+The peer is a resource sharing node of a peer-to-peer system. 
+Peers rely on a CloudDB to keep track of all resource transaction data, including:
+- Pending resource requests
+- Incoming resource requests
+- Granted resources
+- Provided resources (available for other peers to request)
+
+#### Methods:
+* **publish_info()** : checks contents of resources folder, publishes a document of my own address and the list of resources (filenames) + maybe some file metadata to the cloud.
+* **fetch_catalog()** : fetches the 'catalog' collection from the cloud, showing all published resources, and their owners peer ids.
+* **request_resource(peer_id, resource_name, num_views)** : request resource from peer for a certain number of views.
+* **grant_resource(peer_id, resource_name, num_views)** : grants and sends the resource to the other peer, makes sure the grant request wasnt already made.
+* **update_permissions(peer_id, resource_name, num_views)** : updates the resource grant permissions to the other peer, publishes it to the cloud and attempts to notify the peer directly.
+* **access_resource(resource_name, provider_id)** : provider_id can be the peer's own address for local owned resources.
+            // it checks the directory of service first for this resource
+            // it decrypts the image, and either returns the raw image data to be supplied to a viewer or pops up the viewer
+            // updates the directory of service after viewing
+            // if remaining views == 0, delete entry from directory of service. like in grant resource
+
+
+\*The peer class integrates a client for all interactions with the cloud. 
+
 
 ### Usage Philosophy
 All extra logic should be impemented in the main program , the serves should just server, aclients should just be used for communication at the byte level, any processing, decryption etc. should be outside of the client and in the main

@@ -9,6 +9,7 @@ use crate::utils::{
     recv_reliable, 
     send_reliable
 };
+use crate::service::Service;
 use tokio::time::Duration;
 
 
@@ -150,8 +151,6 @@ impl Client {
         
         let request_message = "Request: Stats"; // Message to send for collecting stats
 
-        
-
         // Send the request message to all nodes
         for node_addr in self.nodes.values() {
             let node_addr = node_addr.clone(); // Clone the address
@@ -179,18 +178,6 @@ impl Client {
             };
             
         }
-
-        // Set up a buffer to receive responses
-
-        // Loop to collect and print responses from each server
-        // for _ in 0..self.nodes.len() {
-        //     // let (size, addr) = socket.recv_from(&mut buffer).await?;
-
-        //     let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
-        //     let response = String::from_utf8_lossy(&buffer[..size]);
-        //     println!("Received response from {}: {}", addr, response);
-        // }
-
         Ok(())
     }
 
@@ -205,6 +192,39 @@ impl Client {
             ));
         }
         Ok(data)
+    }
+
+    pub async fn invoke_service<S>(
+        &self,
+        service: &S,
+        args: Option<HashMap<String, String>>,
+        data: Option<S::RequestData>,
+    ) -> Result<S::ResponseData, std::io::Error>
+    where
+        S: Service,
+    {
+        // Serialize arguments
+        // Convert args into a Vec<String> of "key:value"
+        let args_vec: Vec<String> = args.clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, value)| format!("{}:{}", key, value))
+            .collect();
+        let args_vec: Vec<&str> = args_vec.iter().map(String::as_str).collect();
+
+        // Serialize request with service
+        let request = service.serialize_request(args.clone(), data);
+
+        // Send the request
+        let response:Vec<u8>;
+        if args.is_some() {
+            response = self.send_data_with_params(request, service.name(), args_vec).await?;
+        }
+        else {
+            response = self.send_data(request, service.name()).await?;
+        }
+        // Deserialize the response
+        Ok(service.deserialize_response(response))
     }
     
 }
