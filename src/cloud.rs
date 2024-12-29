@@ -16,7 +16,7 @@ use serde_json::{json, Value, to_string};
 use colored::*; // Import the trait for coloring
 use uuid::Uuid;
 
-use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable, extract_variable};
+use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable, extract_variable, extract_args};
 use crate::service::Service;
 
 
@@ -52,13 +52,13 @@ pub struct CloudNode {
     db_data_version: Arc<Mutex<u32>>,
     time_to_update: Arc<Mutex<bool>>,
     
-    services: Vec<Box<dyn Service>>,
+    services: Vec<Arc<dyn Service + 'static>>,
 }
 
 impl CloudNode {
     /// Creates a new CloudNode
     pub async fn new(
-        services: Vec<Box<dyn Service>>,
+        services: Vec<Box<dyn Service + 'static>>,
         num_workers:u32,
         address: SocketAddr,
         nodes: Option<HashMap<String, SocketAddr>>,
@@ -90,6 +90,8 @@ impl CloudNode {
         for table_name in table_names.unwrap_or_else(Vec::new) {
             collections.insert(table_name.to_string(), Vec::new());
         }
+
+        let services: Vec<Arc<dyn Service + 'static>> = services.into_iter().map(Arc::from).collect();
 
         Ok(Arc::new(CloudNode {
             nodes: Arc::new(Mutex::new(initial_nodes)),
@@ -191,7 +193,7 @@ impl CloudNode {
                 let received_msg: String = String::from_utf8_lossy(&packet).into_owned();
 
                 // Send to queue
-                if received_msg == "Request: UpdateInfo" {
+                if received_msg == "ReqInternal: UpdateInfo" {
                     internal_queue1.lock().await.push_back((received_msg, addr, Instant::now()));
                 }
                 else {
@@ -220,13 +222,13 @@ impl CloudNode {
                 };
 
                 // Drop old requests, focus on ones the clients are still waiting on
-                if recv_time.elapsed() > Duration::from_secs(DEFAULT_TIMEOUT) || received_msg != "Request: UpdateInfo"{
+                if recv_time.elapsed() > Duration::from_secs(DEFAULT_TIMEOUT) || received_msg != "ReqInternal: UpdateInfo"{
                     continue;
                 }                
 
                 // Stats msgs and updateInfo msgs pass directly
                 let node = proc_self.clone();
-                if received_msg == "Request: Stats"  {
+                if received_msg == "ReqInternal: Stats"  {
                     // Spawn a task to handle the connection and data processing
                     tokio::spawn(async move {
                         // let start_time = Instant::now(); // Record start time
@@ -240,7 +242,7 @@ impl CloudNode {
                     });
                     
                 }
-                else if received_msg == "Request: UpdateInfo" {
+                else if received_msg == "ReqInternal: UpdateInfo" {
                     println!("received UpdateInfo");
                     if let Err(e) = proc_self.handle_info_request(addr).await {
                         eprintln!("Error handling UpdateInfo: {:?}", e);
@@ -274,13 +276,13 @@ impl CloudNode {
                     let service_name = received_msg.split_whitespace().nth(1).unwrap_or("");
 
                     // Avoid infinite electing, only elect for public services
-                    if received_msg != "Request: Stats"  && received_msg != "Request: UpdateInfo" {
+                    if received_msg != "ReqInternal: Stats"  && received_msg != "ReqInternal: UpdateInfo" {
                         // count new request for service
                         *proc_self.requests.lock().await += 1;
                     }
 
                     // If its a DB operation, sync data with other nodes.
-                    if received_msg.starts_with("Request: CreateCollection") || received_msg.starts_with("Request: AddDocument") || received_msg.starts_with("Request: DeleteDocument") || received_msg.starts_with("Request: ReadCollection") {
+                    if received_msg.starts_with("ReqMem: CreateCollection") || received_msg.starts_with("ReqMem: AddDocument") || received_msg.starts_with("ReqMem: DeleteDocument") || received_msg.starts_with("ReqMem: ReadCollection") {
                     // election slows things down a lot
                         let node = proc_self.clone();
                         tokio::spawn(async move {
@@ -289,52 +291,35 @@ impl CloudNode {
                     }
 
                     // Stats msgs and updateInfo msgs pass directly
-                    if received_msg == "Request: Stats"  || received_msg == "Request: UpdateInfo" || proc_self.elected.lock().await.clone() { // only if elected, or its a stats request
+                    if proc_self.elected.lock().await.clone() { // only if elected, or its a stats request
                         println!("Handling something");
                         let node = proc_self.clone();
-                        if received_msg == "Request: Encrypt"  {
-                                println!("looping6");
+                        // if received_msg == "Request: Encrypt"  {
+                        let service_option = proc_self.services.iter().find(|s| s.name() == service_name);
+                        let _args = extract_args(received_msg.as_str());
 
-                                // Spawn a task to handle the connection and data processing
-                                println!("looping7");
-                                tokio::spawn(async move {
-                                    let start_time = Instant::now(); // Record start time
-                                    if let Err(e) = node.handle_encryption(addr).await {
-                                        eprintln!("Error handling Encrypt: {:?}", e);
-                                        *node.failures.lock().await += 1; 
-                                    }
-                                    else{
-                                        let elapsed: Duration = start_time.elapsed();
-                                        *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
-                                        println!("Encrypt Done for {}", addr);
-                                    }
-                                });
-                        }
-                        else if received_msg == "Request: Stats"  {
-                            println!("looping8");
+                        if received_msg.split_whitespace().nth(0).unwrap_or("") == "Request:" && service_option.is_some() && _args.is_ok() {
+                            let service = service_option.unwrap().clone();
+                            let args = _args.unwrap();
                             // Spawn a task to handle the connection and data processing
+                            println!("looping7");
                             tokio::spawn(async move {
-                                // let start_time = Instant::now(); // Record start time
-                                if let Err(e) = node.handle_stats(addr).await {
-                                    eprintln!("Error handling Stats: {:?}", e);
+                                let start_time = Instant::now(); // Record start time                    
+                                if let Err(e) = node.handle_service(&service, args, addr).await {
+                                    eprintln!("Error handling Service: {:?}", e);
+                                    *node.failures.lock().await += 1; 
                                 }
                                 else{
-                                    println!("Stats Done for {}", addr);
+                                    let elapsed: Duration = start_time.elapsed();
+                                    *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
+                                    println!("Service Done for {}", addr);
                                 }
-
                             });
-                            
                         }
-                        else if received_msg == "Request: UpdateInfo" {
-                            println!("received UpdateInfo");
-                            if let Err(e) = proc_self.handle_info_request(addr).await {
-                                eprintln!("Error handling UpdateInfo: {:?}", e);
-                            }
-                        }
-
-
+                        
+                        
                         // Distributed DB stuff
-                        else if received_msg == "Request: CreateCollection" {
+                        else if received_msg == "ReqDB: CreateCollection" {
                             if let Err(e) = proc_self.db_add_table(addr).await {
                                 eprintln!("Error handling add table service: {:?}", e);
                             } else {
@@ -342,7 +327,7 @@ impl CloudNode {
                                 println!("AddCollection Done for {}", addr);
                             }
                         }
-                        else if received_msg.starts_with("Request: AddDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                        else if received_msg.starts_with("ReqMem: AddDocument") {  // only check the first part of "ReqMem: AddDocument<tablename>"
                             let start_time = Instant::now();
                             if let Err(e) = proc_self.db_add_entry(&received_msg.clone(), addr).await {
                                 eprintln!("Error handling add doc service: {:?}", e);
@@ -353,7 +338,7 @@ impl CloudNode {
                                 *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
                             }
                         }
-                        else if received_msg.starts_with("Request: UpdateDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                        else if received_msg.starts_with("Request: UpdateDocument") {  // only check the first part of "ReqMem: AddDocument<tablename>"
                             let start_time = Instant::now();
                             if let Err(e) = proc_self.db_update_entry(&received_msg.clone(), addr).await {
                                 eprintln!("Error handling update doc service: {:?}", e);
@@ -365,7 +350,7 @@ impl CloudNode {
 
                             }
                         }
-                        else if received_msg.starts_with("Request: DeleteDocument") {  // only check the first part of "Request: AddDocument<tablename>"
+                        else if received_msg.starts_with("ReqMem: DeleteDocument") {  // only check the first part of "ReqMem: AddDocument<tablename>"
                             let start_time = Instant::now();
                             if let Err(e) = proc_self.db_delete_entry(&received_msg.clone(), addr).await {
                                 eprintln!("Error handling delete doc service: {:?}", e);
@@ -376,7 +361,7 @@ impl CloudNode {
                                 *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
                             }
                         }
-                        else if received_msg.starts_with("Request: ReadCollection") { // only check the first part of "Request: ReadCollection<tablename>"
+                        else if received_msg.starts_with("ReqMem: ReadCollection") { // only check the first part of "ReqMem: ReadCollection<tablename>"
                             tokio::spawn(async move {
                                 let start_time = Instant::now(); // Record start time
                                 if let Err(e) = node.db_read_table(&received_msg.clone(), addr).await {
@@ -416,7 +401,7 @@ impl CloudNode {
             if addr == self.public_socket.local_addr().unwrap() {
                 continue;
             }
-            let request_msg: &str = "Request: UpdateInfo";
+            let request_msg: &str = "ReqInternal: UpdateInfo";
     
             // Send the request to the node
             send_with_retry(&socket, request_msg.as_bytes(), addr, 10).await.unwrap();
@@ -610,6 +595,50 @@ impl CloudNode {
 
         *self.completed.lock().await += 1;
         println!("Done handling Encrypt for: {}", addr);
+        Ok(())
+    }
+
+    /// Handle an incoming connection, aggregate the data, process it, and send a response
+    async fn handle_service(
+        self: &Arc<Self>, 
+        service: &Arc<dyn Service>, 
+        args: HashMap<String, String>, 
+        addr: SocketAddr
+    ) -> Result<()> {
+        println!("Processing request from client: {}", addr);
+
+        // Establish a connection to the client for sending responses
+        let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
+        println!("Established connection with client on {}", socket.local_addr()?);
+
+        // Send "OK" message to the client to indicate we are ready to receive data
+        send_with_retry(&socket, b"OK", addr, 5).await?;
+        println!("Sent 'OK' message for Encrypt to {}", addr);
+
+        let (aggregated_data, _, _) = recv_reliable(&socket, Some(Duration::from_secs(5))).await?;
+        // Increment accepted
+        *self.accepted.lock().await += 1;
+
+        // Process the aggregated data
+        let deserialized_data = if !aggregated_data.is_empty() {
+            Some(service.deserialize_request(aggregated_data)?)
+        } else {
+            None
+        };
+    
+
+        // Process the request
+        let response_data = service.process(
+            args, // Convert args to JSON value
+            deserialized_data,
+        )?;
+        // Serialize the response data
+        let serialized_response = service.serialize_response(response_data)?;
+
+        // Send response
+        send_reliable(&socket, &serialized_response, addr).await?;
+
+        *self.completed.lock().await += 1;
         Ok(())
     }
 

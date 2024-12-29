@@ -1,4 +1,5 @@
 use tokio::net::UdpSocket;
+use std::any::Any;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::error::Error;
@@ -149,7 +150,7 @@ impl Client {
         // Create a UDP socket
         let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
         
-        let request_message = "Request: Stats"; // Message to send for collecting stats
+        let request_message = "ReqInternal: Stats"; // Message to send for collecting stats
 
         // Send the request message to all nodes
         for node_addr in self.nodes.values() {
@@ -194,15 +195,12 @@ impl Client {
         Ok(data)
     }
 
-    pub async fn invoke_service<S>(
+    pub async fn invoke_service(
         &self,
-        service: &S,
+        service: &dyn Service,
         args: Option<HashMap<String, String>>,
-        data: Option<S::RequestData>,
-    ) -> Result<S::ResponseData, std::io::Error>
-    where
-        S: Service,
-    {
+        data: Option<Box<dyn Any + Send>>,
+    ) -> Result<Box<dyn Any + Send>, std::io::Error> {
         // Serialize arguments
         // Convert args into a Vec<String> of "key:value"
         let args_vec: Vec<String> = args.clone()
@@ -213,7 +211,13 @@ impl Client {
         let args_vec: Vec<&str> = args_vec.iter().map(String::as_str).collect();
 
         // Serialize request with service
-        let request = service.serialize_request(args.clone(), data);
+        let request: Vec<u8>;
+        if let Some(d) = data {
+            request = service.serialize_request(d)?;
+        }
+        else {
+            request = vec![];
+        }
 
         // Send the request
         let response:Vec<u8>;
@@ -224,7 +228,7 @@ impl Client {
             response = self.send_data(request, service.name()).await?;
         }
         // Deserialize the response
-        Ok(service.deserialize_response(response))
+        Ok(service.deserialize_response(response)?)
     }
     
 }

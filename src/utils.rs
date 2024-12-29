@@ -379,3 +379,33 @@ pub fn extract_variable(input: &str) -> Result<String, io::Error> {
         Err(io::Error::new(io::ErrorKind::Other, "No variable supplied"))
     }
 }
+
+pub fn extract_args(input: &str) -> Result<HashMap<String, String>, io::Error> {
+    /// Extracts string args passed in requests in the form: <key:value,key2:value2,...>
+    // Define a regex pattern to match key-value pairs inside <key:value,key2:value2,...>
+    let re = Regex::new(r"<([^>]+)>").unwrap(); // This will match anything between < and >
+
+    // Apply the regex and capture the key-value pairs
+    if let Some(captures) = re.captures(input) {
+        // Capture the string inside the <...>
+        let args_str = &captures[1];
+        
+        // Initialize a HashMap to store the key-value pairs
+        let mut args_map = HashMap::new();
+
+        // Split the captured string by commas to separate key-value pairs
+        for pair in args_str.split(',') {
+            // Split each key-value pair by colon
+            let mut key_value = pair.splitn(2, ':'); // Split only once at the first colon
+            if let (Some(key), Some(value)) = (key_value.next(), key_value.next()) {
+                args_map.insert(key.trim().to_string(), value.trim().to_string());
+            } else {
+                // If there's an invalid pair (missing colon or value), return an error
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid key-value pair"));
+            }
+        }
+        Ok(args_map)
+    } else {
+        Err(io::Error::new(io::ErrorKind::Other, "No arguments found"))
+    }
+}

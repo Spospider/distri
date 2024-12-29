@@ -11,13 +11,15 @@ CloudNodes also hold their own NoSQL in-memory DB. its not designed for holding 
 
 \* Read-write operations on the DB are syncronous in the main thread to guarantee data consistency.
 
+>TODO Add Standard error responses to be handled & reflected in client middlewares.
+
 #### Available Services:
 **Internal Services: (should only be used by the CloudNodes among themselves)**
-- "**Request: UpdateInfo**"
+- "**ReqInternal: UpdateInfo**"
     Used to Sync data between server nodes. Data exchanged include node id, load, DB Collections, and DB data version.
 
 **Public Services:**
-- "**Request: Stats**"
+- "**ReqInternal: Stats**"
     Used to fetch stats data from a server, no election is applied with this request, a server will always respond. No (OK) handshaking mechanism here.
 - "**Request: Encrypt**"
     Used to encrypt an image and send the result back.
@@ -30,17 +32,17 @@ CloudNodes also hold their own NoSQL in-memory DB. its not designed for holding 
 
 
 **Distributed DB Services:**
-- "**Request: CreateCollection**"
+- "**ReqDB: CreateCollection**"
     Used to add a new Collection to the DB, given data of the Collection name as string.
-- "**Request: AddDocument<*collection_name*>**"
+- "**ReqMem: AddDocument<*collection_name*>**"
     Used to add a new document to a collection in the DB, given the parameter collection_name.
 - "**Request: UpdateDocument<*collection_name*>**"
     Used to update an existing document to a collection in the DB, given the parameter collection_name, and a json that will be matched with the target entry. if no entry is found, a new entry is added from the given json anyway.
 
-- "**Request: DeleteDocument<*collection_name*>**"
+- "**ReqMem: DeleteDocument<*collection_name*>**"
     Delete document from a collection in the DB, given the parameter collection_name, given data of a JSON-String of attributes and values to exact-match on.
     > ***TODO**: range params*
-- "**Request: ReadCollection**"
+- "**ReqMem: ReadCollection**"
     Returns the complete list of docs for a collection
     > ***TODO** Pagination*
 
