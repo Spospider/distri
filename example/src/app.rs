@@ -2,7 +2,7 @@
 // use an instance of the peer class to perform all interactions
 // communicate with fekry & ali on function signatures.
 
-use std::io::{self, Write};
+use std::io;
 use std::collections::HashMap;
 use distri::peer::Peer;
 use std::sync::Arc;
@@ -111,8 +111,8 @@ fn parse_shared_images(entries: Vec<Value>) -> Vec<(String, String, usize)> {
 
 fn clear_screen() {
     return;
-    print!("\x1B[2J\x1B[H"); // ANSI escape codes to clear the screen and move the cursor to the top-left corner
-    io::stdout().flush().unwrap();
+    // print!("\x1B[2J\x1B[H"); // ANSI escape codes to clear the screen and move the cursor to the top-left corner
+    // io::stdout().flush().unwrap();
 }
 
 fn render_ui(
@@ -189,22 +189,21 @@ pub async fn run_program(peer:&Arc<Peer>) {
         let inbox_queue = peer.inbox_queue().await.clone();
         let mut received_requests = parse_requests_or_grants(inbox_queue, "request");
     
-        let mut pending_requests = vec![("User C".to_string(), "image4".to_string(), 3)];
         let pend_requests = peer.pending_approval().await.clone();
-        pending_requests = parse_requests_or_grants(pend_requests, "request");
+        let pending_requests = parse_requests_or_grants(pend_requests, "request");
         println!{"pending approval: {:?}", pending_requests};
         // Fetch granted access
         let grants = peer.available_resources().await.clone();
         let granted_vec = parse_requests_or_grants(grants, "grant");
         
         // Convert to HashMap
-        let mut granted_access: HashMap<(String, String), usize> = granted_vec
+        let granted_access: HashMap<(String, String), usize> = granted_vec
             .into_iter()
             .map(|(provider, resource_name, num_views)| ((provider, resource_name), num_views))
             .collect();
 
         let shared_imgs = peer.shared_images().await.clone();
-        let mut shared_images = parse_shared_images(shared_imgs);
+        let shared_images = parse_shared_images(shared_imgs);
     
         render_ui(
             &directory_of_service,

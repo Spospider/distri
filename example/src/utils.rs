@@ -1,20 +1,15 @@
 use tokio::{fs::File, io::AsyncWriteExt};
 use base64;
 use std::error::Error;
-use steganography::decoder::*;
-use steganography::util::*;
-
-use image::GenericImageView;
-
-
 use std::thread;
 use std::time::Duration;
+use steganography::decoder::*;
+use steganography::util::*;
 
 use show_image::*;
 
 
 // Helper functions
-
 async fn read_from_img(img_path: &str) -> Result<String, Box<dyn Error + 'static>> {
     let encoded_image = file_as_image_buffer(img_path.to_string());
     let decoder = Decoder::new(encoded_image);
@@ -101,7 +96,7 @@ pub async fn decrypt_image(input_path: &str, output_path: &str) -> Result<(), st
 }
 
 pub async fn write_to_file(file_path: &str, data: &[u8]) -> Result<(), std::io::Error> {
-    return Ok(());
+    // return Ok(());
     match File::create(file_path).await {
         Ok(mut file) => {
             file.write_all(data).await?;

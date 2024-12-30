@@ -14,16 +14,16 @@ use serde_json::{to_vec, Value, json};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Barrier;
-use std::process::{Command, Child};
-
-
-use show_image::*;
+use std::process::Command;
 
 mod utils;
 use utils::{decrypt_image, write_to_file};
 
 mod app;
 use app::run_program;
+
+mod services;
+use services::EncryptService;
 
 
 #[derive(Parser, Debug)]
@@ -76,7 +76,7 @@ async fn main() {
             let table_names = Some(vec!["catalog", "permissions", "users"]);
 
             // Create and start the server
-            let server = CloudNode::new(4, own_addr, Some(node_map), 1024, table_names).await.unwrap();
+            let server = CloudNode::new(vec![Box::new(EncryptService)], 4, own_addr, Some(node_map), 1024, table_names).await.unwrap();
             let server_arc = Arc::new(server);
             server_arc.serve().await.unwrap();
         }
@@ -101,7 +101,7 @@ async fn main() {
 
             // Load test: Send 10_000 requests
             let start_time = Instant::now();
-            for _ in 0..10 {
+            for _ in 0..1 {
                 // Read the file data to be sent
                 let mut file = File::open(file_path).await.unwrap();
                 let mut data = Vec::new();
@@ -131,7 +131,6 @@ async fn main() {
                 // sleep(tokio::time::Duration::from_millis(50)).await; // Optional delay between requests
             }
 
-            let params = vec!["catalog"];
             let mut client_catalogue =json!({
                 "images" : {
                     "img1" : {
@@ -149,24 +148,20 @@ async fn main() {
                 "provider" : "127.0.0.1:1234"
             }); 
             // converted to an array of bytes
-            let client_catalogue_bytes = to_vec(&client_catalogue).expect("Failed to serialize JSON");
             println!("pushing to DB...");
-            let result = client.send_data_with_params(client_catalogue_bytes, "AddDocument", params.clone()).await.unwrap();
+            let result = client.add_document("catalog", client_catalogue.clone()).await.unwrap_or_default();
             println!("Add Doc Result: {}", String::from_utf8_lossy(&result));
 
             // converted to an array of bytes
             client_catalogue["doc"] = Value::String("2".to_string());
-            let client_catalogue_bytes = to_vec(&client_catalogue).expect("Failed to serialize JSON");
             println!("pushing to DB...");
-            let result = client.send_data_with_params(client_catalogue_bytes, "AddDocument", params.clone()).await.unwrap();
+            let result = client.add_document("catalog", client_catalogue.clone()).await.unwrap_or_default();
             println!("Add Doc Result: {}", String::from_utf8_lossy(&result));
 
             client_catalogue["UUID"] = Value::String(String::from_utf8_lossy(&result).to_string());
             client_catalogue["New thing"] = Value::String("some txt".to_string());
 
-            let client_catalogue_bytes = to_vec(&client_catalogue).expect("Failed to serialize JSON");
-
-            let result = client.send_data_with_params(client_catalogue_bytes, "UpdateDocument", params.clone()).await.unwrap();
+            let result = client.update_document("catalog", client_catalogue.clone()).await.unwrap_or_default();
             println!("Update Doc Result: {}", String::from_utf8_lossy(&result));
 
             
@@ -175,12 +170,10 @@ async fn main() {
             let filter =json!({
                 "doc" : "1"
             }); 
-            let params = vec!["catalog"];
-            let result = client.send_data_with_params(to_vec(&filter).expect(""), "ReadCollection", params).await.unwrap();
+            let result = client.read_collection("catalog", Some(filter)).await.unwrap_or_default();
             println!("Directory of Service Result:\n{}", String::from_utf8_lossy(&result));
             // Read directory of service
-            let params = vec!["catalog"];
-            let result = client.send_data_with_params(Vec::new(), "ReadCollection", params).await.unwrap();
+            let result = client.read_collection("catalog", None).await.unwrap_or_default();
             println!("Directory of Service Result:\n{}", String::from_utf8_lossy(&result));
             let elapsed: Duration = start_time.elapsed();
 
@@ -200,7 +193,7 @@ async fn main() {
 
             // Initialize server and other nodes in the network
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
-            for (i, addr) in other_ips.iter().enumerate() {
+            for (_, addr) in other_ips.iter().enumerate() {
                 node_map.insert(addr.port().to_string(), *addr);
             }
 
@@ -216,7 +209,6 @@ async fn main() {
 
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
             for j in 0..args.n_servers {
-                let port = start_port + j;
                 let server_port = start_port + j;
                 let server_addr = format!("{}:{}", base_ip, server_port);
                 let server_socket: SocketAddr = server_addr.parse().unwrap();
@@ -240,7 +232,7 @@ async fn main() {
                         let result = client.send_data(_data.clone(), "Encrypt").await;
                         match result {
                             Ok(_) => {}
-                            Err(e) => {
+                            Err(_e) => {
                                 failures += 1;
                                 // eprintln!("{}", e);
                             },
@@ -276,7 +268,6 @@ async fn main() {
 
             let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
             for j in 0..args.n_servers {
-                let port = start_port + j;
                 let server_port = start_port + j;
                 let server_addr = format!("{}:{}", base_ip, server_port);
                 let server_socket: SocketAddr = server_addr.parse().unwrap();
@@ -353,16 +344,12 @@ async fn main() {
 
         "test-servers" => {
             // test-servers mode - automatically generate IPs starting from 3000
-            let barrier = Arc::new(Barrier::new(args.n + 1));
-            // let mut tasks = vec![];
-
             for i in 0..args.n {
                 let port = start_port + i;
                 let server_addr = format!("{}:{}", base_ip, port);
                 // let own_addr: SocketAddr = server_addr.parse().unwrap();
                 
                 // Generate the node map for this server
-                let mut node_map: HashMap<String, SocketAddr> = HashMap::new();
                 let mut ips: Vec<String> = vec![server_addr.clone()];
                 for j in 0..args.n {
                     if i != j {
@@ -382,7 +369,7 @@ async fn main() {
                 //     server_arc.serve().await.unwrap();
                 // }));
                 let ips_arg = ips.join(",");
-                let child = Command::new("./target/release/example")
+                let _child = Command::new("./target/release/example")
                     // .arg("./target/release/example") // Or `--release` for optimized builds
                     .arg("--mode")
                     .arg("server") // Replace with the actual binary name for your server

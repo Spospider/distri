@@ -82,7 +82,7 @@ pub async fn server_decrypt_img(base_img_path: &str, output_hidden_img_path: &st
     Ok(())
 }
 pub async fn write_to_file(file_path: &str, data: &[u8]) -> Result<(), std::io::Error> {
-    return Ok(());
+    // return Ok(());
     match File::create(file_path).await {
         Ok(mut file) => {
             file.write_all(data).await?;
@@ -406,6 +406,8 @@ pub fn extract_args(input: &str) -> Result<HashMap<String, String>, io::Error> {
         }
         Ok(args_map)
     } else {
-        Err(io::Error::new(io::ErrorKind::Other, "No arguments found"))
+        // return empty string-string hashmap 
+        Ok(HashMap::new())
+        // Err(io::Error::new(io::ErrorKind::Other, "No arguments found"))
     }
 }

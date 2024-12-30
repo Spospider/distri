@@ -32,11 +32,11 @@ CloudNodes also hold their own NoSQL in-memory DB. its not designed for holding 
 
 
 **Distributed DB Services:**
-- "**ReqDB: CreateCollection**"
+- "**ReqMem: CreateCollection**"
     Used to add a new Collection to the DB, given data of the Collection name as string.
 - "**ReqMem: AddDocument<*collection_name*>**"
     Used to add a new document to a collection in the DB, given the parameter collection_name.
-- "**Request: UpdateDocument<*collection_name*>**"
+- "**ReqMem: UpdateDocument<*collection_name*>**"
     Used to update an existing document to a collection in the DB, given the parameter collection_name, and a json that will be matched with the target entry. if no entry is found, a new entry is added from the given json anyway.
 
 - "**ReqMem: DeleteDocument<*collection_name*>**"

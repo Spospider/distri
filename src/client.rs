@@ -123,12 +123,9 @@ impl Client {
     
         // Buffer for receiving data
         let mut buffer = [0u8; 1024];
-    
         // Listen for the first response from any node
         let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
-    
         let response = String::from_utf8_lossy(&buffer[..size]);
-        
         // if there is data to send, expect Ok message first
         if response == "OK" {
             // println!("Request for service accepted from {}", addr);
@@ -143,6 +140,121 @@ impl Client {
             return Ok(result?);
         }
         Err(std::io::Error::new(std::io::ErrorKind::Other, "Send request not accepted."))    
+    }
+
+    async fn send_with_params(
+        &self, 
+        data: Vec<u8>, 
+        servicestr: &str, 
+        params: Vec<&str>
+    ) -> Result<Vec<u8>, std::io::Error> {
+        // Create a UDP socket for sending and receiving messages
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;  // Bind to any available port
+    
+        // Build the parameterized request message
+        let param_string = params.join(","); // Combine parameters into a comma-separated string
+        let request_message = format!("{}<{}>", servicestr, param_string); // Format request message
+    
+        // Multicast the message to all nodes
+        for node_addr in self.nodes.values() {
+            let node_addr = node_addr.clone(); // Clone the address
+            // println!("Sending request to {}", node_addr);
+    
+            // Send the request message with retries
+            match send_with_retry(&socket, request_message.as_bytes(), node_addr, 5).await {
+                Ok(_) => {
+                    // println!("Request message sent to {}", node_addr);
+                }
+                Err(e) => {
+                    // eprintln!("Failed to send message to {}: {:?}", node_addr, e);
+                }
+            }
+        }
+    
+        // Buffer for receiving data
+        let mut buffer = [0u8; 1024];
+        // Listen for the first response from any node
+        let (size, addr) = recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await?;
+        let response = String::from_utf8_lossy(&buffer[..size]);
+        // if there is data to send, expect Ok message first
+        if response == "OK" {
+            // println!("Request for service accepted from {}", addr);
+        
+            if !data.is_empty(){
+                // Send the file data reliably
+                send_reliable(&socket, &data, addr).await?;
+            }
+    
+            // Start receiving the result
+            let result = self.await_result(socket, addr).await;
+            return Ok(result?);
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Send request not accepted."))    
+    }
+
+    // TODO implement functions for ReadCollection, AddDocument, CreateCollection, UpdateCollection, DeleteDocument 
+    // these functions will be like send_data_with_params, but instead of "Request: ..." it will be "ReqMem: ..."
+    // the functions ReadCollection, DeleteDocument, and UpdateCollection have a filter json input which is sent as data bytes
+    // the functions ReadCollection,AddDocument, DeleteDocument, and UpdateCollection will have a table_name input, will will be used like a param "table:table_name" in send_data_with_params
+    // ReadCollection - Reads data from a collection (like a database query with filters)
+    pub async fn read_collection(
+        &self,
+        table_name: &str,
+        filter: Option<serde_json::Value>
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let filter_json = filter.map(|f| serde_json::to_vec(&f).unwrap()).unwrap_or_else(Vec::new);
+        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let params = vec![table_param.as_str()]; // Use a reference to the string
+
+        self.send_with_params(filter_json, "ReqMem: ReadCollection", params).await
+    }
+
+    // AddDocument - Adds a document to the collection
+    pub async fn add_document(
+        &self,
+        table_name: &str,
+        document: serde_json::Value
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let document_bytes = serde_json::to_vec(&document)?;
+        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let params = vec![table_param.as_str()]; // Use a reference to the string
+        self.send_with_params(document_bytes, "ReqMem: AddDocument", params).await
+    }
+
+    // CreateCollection - Creates a new collection (table in the DB)
+    pub async fn create_collection(
+        &self,
+        table_name: &str
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let params = vec![table_param.as_str()]; // Use a reference to the string
+        self.send_with_params(Vec::new(), "ReqMem: CreateCollection", params).await
+    }
+
+    // UpdateCollection - Updates a collection (can use filters to specify updates)
+    pub async fn update_document(
+        &self,
+        table_name: &str,
+        document: serde_json::Value
+    ) -> Result<Vec<u8>, std::io::Error> {
+        // let filter_json = serde_json::to_vec(&filter)?;
+        let update_json_bytes = serde_json::to_vec(&document)?;
+        
+        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let params = vec![table_param.as_str()]; // Use a reference to the string
+        self.send_with_params(update_json_bytes, "ReqMem: UpdateDocument", params).await
+    }
+
+    // DeleteDocument - Deletes a document from a collection
+    pub async fn delete_document(
+        &self,
+        table_name: &str,
+        filter: serde_json::Value
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let filter_json = serde_json::to_vec(&filter)?;
+        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let params = vec![table_param.as_str()]; // Use a reference to the string
+        self.send_with_params(filter_json, "ReqMem: DeleteDocument", params).await
     }
 
 
@@ -230,5 +342,5 @@ impl Client {
         // Deserialize the response
         Ok(service.deserialize_response(response)?)
     }
-    
+
 }

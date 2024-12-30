@@ -15,6 +15,7 @@ regex = "1.11.1"
 winit = "0.28.6"
 image = "0.25.5"
 show-image = "0.13.0"
+async-trait = "0.1"
 
 
 [dependencies.uuid]

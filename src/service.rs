@@ -1,4 +1,5 @@
 use std::{any::Any, collections::HashMap};
+use async_trait::async_trait;
 
 // pub trait Service: Send + Sync {
 //     type RequestData;  // Type for the request data
@@ -26,6 +27,7 @@ use std::{any::Any, collections::HashMap};
 //     fn process(&self, args: HashMap<String, String>, data: Option<Self::RequestData>) -> Result<Self::ResponseData, std::io::Error>;
 // }
 
+#[async_trait]
 pub trait Service: Send + Sync {
     fn name(&self) -> &'static str;
 
@@ -37,5 +39,5 @@ pub trait Service: Send + Sync {
 
     fn deserialize_response(&self, data: Vec<u8>) -> Result<Box<dyn Any + Send>, std::io::Error>;
 
-    fn process(&self, args: HashMap<String, String>, data: Option<Box<dyn Any + Send>>) -> Result<Box<dyn Any + Send>, std::io::Error>;
+    async fn process(&self, args: HashMap<String, String>, data: Option<Box<dyn Any + Send>>) -> Result<Box<dyn Any + Send>, std::io::Error>;
 }
