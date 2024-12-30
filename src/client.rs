@@ -192,10 +192,7 @@ impl Client {
         Err(std::io::Error::new(std::io::ErrorKind::Other, "Send request not accepted."))    
     }
 
-    // TODO implement functions for ReadCollection, AddDocument, CreateCollection, UpdateCollection, DeleteDocument 
-    // these functions will be like send_data_with_params, but instead of "Request: ..." it will be "ReqMem: ..."
-    // the functions ReadCollection, DeleteDocument, and UpdateCollection have a filter json input which is sent as data bytes
-    // the functions ReadCollection,AddDocument, DeleteDocument, and UpdateCollection will have a table_name input, will will be used like a param "table:table_name" in send_data_with_params
+    /// DB Operations
     // ReadCollection - Reads data from a collection (like a database query with filters)
     pub async fn read_collection(
         &self,
