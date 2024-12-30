@@ -196,11 +196,11 @@ impl Client {
     // ReadCollection - Reads data from a collection (like a database query with filters)
     pub async fn read_collection(
         &self,
-        table_name: &str,
+        collection_name: &str,
         filter: Option<serde_json::Value>
     ) -> Result<Vec<u8>, std::io::Error> {
         let filter_json = filter.map(|f| serde_json::to_vec(&f).unwrap()).unwrap_or_else(Vec::new);
-        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let table_param = format!("table:{}", collection_name); // Create the formatted string
         let params = vec![table_param.as_str()]; // Use a reference to the string
 
         self.send_with_params(filter_json, "ReqMem: ReadCollection", params).await
@@ -209,11 +209,11 @@ impl Client {
     // AddDocument - Adds a document to the collection
     pub async fn add_document(
         &self,
-        table_name: &str,
+        collection_name: &str,
         document: serde_json::Value
     ) -> Result<Vec<u8>, std::io::Error> {
         let document_bytes = serde_json::to_vec(&document)?;
-        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let table_param = format!("table:{}", collection_name); // Create the formatted string
         let params = vec![table_param.as_str()]; // Use a reference to the string
         self.send_with_params(document_bytes, "ReqMem: AddDocument", params).await
     }
@@ -221,9 +221,9 @@ impl Client {
     // CreateCollection - Creates a new collection (table in the DB)
     pub async fn create_collection(
         &self,
-        table_name: &str
+        collection_name: &str
     ) -> Result<Vec<u8>, std::io::Error> {
-        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let table_param = format!("table:{}", collection_name); // Create the formatted string
         let params = vec![table_param.as_str()]; // Use a reference to the string
         self.send_with_params(Vec::new(), "ReqMem: CreateCollection", params).await
     }
@@ -231,13 +231,13 @@ impl Client {
     // UpdateCollection - Updates a collection (can use filters to specify updates)
     pub async fn update_document(
         &self,
-        table_name: &str,
+        collection_name: &str,
         document: serde_json::Value
     ) -> Result<Vec<u8>, std::io::Error> {
         // let filter_json = serde_json::to_vec(&filter)?;
         let update_json_bytes = serde_json::to_vec(&document)?;
         
-        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let table_param = format!("table:{}", collection_name); // Create the formatted string
         let params = vec![table_param.as_str()]; // Use a reference to the string
         self.send_with_params(update_json_bytes, "ReqMem: UpdateDocument", params).await
     }
@@ -245,11 +245,11 @@ impl Client {
     // DeleteDocument - Deletes a document from a collection
     pub async fn delete_document(
         &self,
-        table_name: &str,
+        collection_name: &str,
         filter: serde_json::Value
     ) -> Result<Vec<u8>, std::io::Error> {
         let filter_json = serde_json::to_vec(&filter)?;
-        let table_param = format!("table:{}", table_name); // Create the formatted string
+        let table_param = format!("table:{}", collection_name); // Create the formatted string
         let params = vec![table_param.as_str()]; // Use a reference to the string
         self.send_with_params(filter_json, "ReqMem: DeleteDocument", params).await
     }

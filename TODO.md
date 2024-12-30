@@ -2,7 +2,7 @@
 
 This TODO list outlines ongoing tasks, feature enhancements, and issues within the Distri framework. Whether you're a first-time contributor or experienced developer, feel free to contribute to any of the tasks listed here.
 
-## Table of Contents
+## collection of Contents
 1. [Bug Fixes](#bug-fixes)
 2. [Features to Implement](#features-to-implement)
 3. [Enhancements & Improvements](#enhancements--improvements)

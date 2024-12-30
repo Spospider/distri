@@ -63,7 +63,7 @@ impl CloudNode {
         address: SocketAddr,
         nodes: Option<HashMap<String, SocketAddr>>,
         _chunk_size: usize,
-        table_names: Option<Vec<&str>>,
+        collection_names: Option<Vec<&str>>,
     ) -> Result<Arc<Self>> {
         // let initial_nodes = nodes.unwrap_or_else(HashMap::new);
         let initial_nodes: HashMap<String, NodeInfo> = nodes
@@ -87,8 +87,8 @@ impl CloudNode {
               
         // initialize any table names that should exist
         let mut collections = HashMap::new();
-        for table_name in table_names.unwrap_or_else(Vec::new) {
-            collections.insert(table_name.to_string(), Vec::new());
+        for collection_name in collection_names.unwrap_or_else(Vec::new) {
+            collections.insert(collection_name.to_string(), Vec::new());
         }
 
         let services: Vec<Arc<dyn Service + 'static>> = services.into_iter().map(Arc::from).collect();
@@ -773,20 +773,20 @@ impl CloudNode {
             let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     // Successfully received data from the correct client
-                    let table_name: &str = &String::from_utf8_lossy(&packet);
+                    let collection_name: &str = &String::from_utf8_lossy(&packet);
 
                     let mut collections = self.collections.lock().await;
-                    if collections.contains_key(table_name) {
+                    if collections.contains_key(collection_name) {
                         // reply to sender
-                        let response = format!("Table '{}' already exists.", table_name);
+                        let response = format!("collection '{}' already exists.", collection_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
                         return Ok(Some(response));
                     } else {
-                        collections.insert(table_name.to_string(), Vec::new());
+                        collections.insert(collection_name.to_string(), Vec::new());
                         // update data version with any change in DB
                         *self.db_data_version.lock().await += 1;
                         // reply to sender
-                        let response = format!("Table '{}' created.", table_name);
+                        let response = format!("collection '{}' created.", collection_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
                         return Ok(Some(response));
                     }
@@ -813,7 +813,7 @@ impl CloudNode {
     async fn db_add_entry(&self, args: HashMap<String, String>,  addr: SocketAddr) -> Result<String> { // change to option so that ? delegates errors to above function
         // Process input var
         println!("IN db_add_entry");
-        let table_name = &args["table"];
+        let collection_name = &args["table"];
 
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         // send ok
@@ -854,7 +854,7 @@ impl CloudNode {
                     }
 
                     let mut collections = self.collections.lock().await;
-                    if let Some(table) = collections.get_mut(table_name) {
+                    if let Some(table) = collections.get_mut(collection_name) {
                         table.push(entry);
                         // update data version with any change in DB
                         *self.db_data_version.lock().await += 1;
@@ -867,7 +867,7 @@ impl CloudNode {
                         return Ok(response);
                     } else {
                         // reply to sender
-                        let response = format!("Table '{}' does not exist.", table_name);
+                        let response = format!("collection '{}' does not exist.", collection_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
                         return Ok(response);
                     }
@@ -894,7 +894,7 @@ impl CloudNode {
     // Update an entry in a specific table
     async fn db_update_entry(&self, args: HashMap<String, String>, addr: SocketAddr) -> Result<String> {
         // Process input variable
-        let table_name = &args["table"];
+        let collection_name = &args["table"];
 
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         // Send OK response
@@ -940,7 +940,7 @@ impl CloudNode {
                     };
 
                     let mut collections = self.collections.lock().await;
-                    if let Some(table) = collections.get_mut(table_name) {
+                    if let Some(table) = collections.get_mut(collection_name) {
                         // Find the entry to update
                         if let Some(existing_entry) = table.iter_mut().find(|doc| {
                             if let Value::Object(ref obj) = doc {
@@ -986,7 +986,7 @@ impl CloudNode {
                         }
                     } else {
                         // Reply to sender
-                        let response = format!("Table '{}' does not exist.", table_name);
+                        let response = format!("collection '{}' does not exist.", collection_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
                         return Ok(response);
                     }
@@ -1013,7 +1013,7 @@ impl CloudNode {
     // Add an entry to a specific table
     async fn db_delete_entry(&self, args: HashMap<String, String>,  addr: SocketAddr) -> Result<String> { // change to option so that ? delegates errors to above function
         // Process input var
-        let table_name = &args["table"];
+        let collection_name = &args["table"];
 
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
 
@@ -1051,7 +1051,7 @@ impl CloudNode {
                     };
                     
                     let mut collections = self.collections.lock().await;
-                    if let Some(table) = collections.get_mut(table_name) {
+                    if let Some(table) = collections.get_mut(collection_name) {
                         // entry represents dict on fields to match on 
                         // example: { "provider" : "abc" }
 
@@ -1067,7 +1067,7 @@ impl CloudNode {
                         // update data version with any change in DB
                         *self.db_data_version.lock().await += 1;
                         println!("Deleted Docs matching: {}", entry);
-                        println!("Docs: {:?}", collections.get_mut(table_name));
+                        println!("Docs: {:?}", collections.get_mut(collection_name));
 
                         // reply to sender
                         let response = "Docs deleted successfully.".to_string();
@@ -1075,7 +1075,7 @@ impl CloudNode {
                         return Ok(response);
                     } else {
                         // reply to sender
-                        let response = format!("Table '{}' does not exist.", table_name);
+                        let response = format!("collection '{}' does not exist.", collection_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
                         return Ok(response);
                     }
@@ -1103,7 +1103,7 @@ impl CloudNode {
     // Read a table and return it as a JSON array
     async fn db_read_table(&self, args: HashMap<String, String>, addr: SocketAddr) -> Result<String> {
         // Extract table name from the received packet as a string
-        let table_name = &args["table"];
+        let collection_name = &args["table"];
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
 
         // send ok
@@ -1138,7 +1138,7 @@ impl CloudNode {
                 };
 
                 let mut collections = self.collections.lock().await;
-                if let Some(table) = collections.get_mut(table_name) {
+                if let Some(table) = collections.get_mut(collection_name) {
                     // entry represents dict on fields to match on 
                     // example: { "provider" : "abc" }
 
@@ -1160,7 +1160,7 @@ impl CloudNode {
                 }
                 else {
                     // reply to sender
-                    let response = format!("Table '{}' does not exist.", table_name);
+                    let response = format!("collection '{}' does not exist.", collection_name);
                     send_reliable(&socket, response.as_bytes(), addr).await?;
                     return Ok(response);
                 }
@@ -1178,15 +1178,15 @@ impl CloudNode {
         // fetch all data
         // Access the collections and attempt to fetch the requested table
         let collections = self.collections.lock().await.clone();
-        if let Some(table) = collections.get(table_name) {
+        if let Some(table) = collections.get(collection_name) {
             // Convert the Vec<Value> to a JSON array and return it
             // reply to sender
             let response = Value::Array(table.clone()).to_string();
             send_reliable(&socket, response.as_bytes(), addr).await?;
-            Ok(format!("Table '{}' read by {}", table_name, addr))
+            Ok(format!("collection '{}' read by {}", collection_name, addr))
         } else {
             // Return an error if the table doesn't exist
-            let response = format!("Table '{}' not found.", table_name);
+            let response = format!("collection '{}' not found.", collection_name);
             send_reliable(&socket, response.as_bytes(), addr).await?;
             Err(Error::new(ErrorKind::NotFound, response))
         }

@@ -73,10 +73,10 @@ async fn main() {
             let own_addr:SocketAddr = args.ips[0].parse().expect("Failed to parse an Socket address");
 
             // define DB tables for directory of service
-            let table_names = Some(vec!["catalog", "permissions", "users"]);
+            let collection_names = Some(vec!["catalog", "permissions", "users"]);
 
             // Create and start the server
-            let server = CloudNode::new(vec![Box::new(EncryptService)], 4, own_addr, Some(node_map), 1024, table_names).await.unwrap();
+            let server = CloudNode::new(vec![Box::new(EncryptService)], 4, own_addr, Some(node_map), 1024, collection_names).await.unwrap();
             let server_arc = Arc::new(server);
             server_arc.serve().await.unwrap();
         }
@@ -360,11 +360,11 @@ async fn main() {
                         // node_map.insert(server_port.to_string(), server_socket);
                     }
                 }
-                // let table_names = Some(vec!["catalog", "permissions", "users"]);
+                // let collection_names = Some(vec!["catalog", "permissions", "users"]);
 
 
                 // tasks.push(tokio::spawn(async move {
-                //     let server = CloudNode::new(4, own_addr, Some(node_map), 1024, table_names).await.unwrap();
+                //     let server = CloudNode::new(4, own_addr, Some(node_map), 1024, collection_names).await.unwrap();
                 //     let server_arc = Arc::new(server);
                 //     server_arc.serve().await.unwrap();
                 // }));

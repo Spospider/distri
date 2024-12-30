@@ -32,6 +32,8 @@ CloudNodes also hold their own NoSQL in-memory DB. its not designed for holding 
 
 
 **Distributed DB Services:**
+NoSQL in-memory DB operations. 
+Divided into collections of documents, uniquely identified by and aassignable UUID field. if not assigned a new unique UUID will be generated and returned as the response of the operation.
 - "**ReqMem: CreateCollection**"
     Used to add a new Collection to the DB, given data of the Collection name as string.
 - "**ReqMem: AddDocument<*collection_name*>**"
@@ -50,8 +52,7 @@ CloudNodes also hold their own NoSQL in-memory DB. its not designed for holding 
 
 
 ### Client
-The Client acts as the communication module to the distriibuted service. Data going in and out of the client is going to be in the format of bytes.
-
+The Client acts as the communication interface to the distriibuted service.
 
 #### Raw Methods
 Below are more low-level methods for itneraction with the clouds, here you must be sure of the names of the services you're utilising, and any params that should be sent.
@@ -63,49 +64,49 @@ Below are more low-level methods for itneraction with the clouds, here you must 
     Performs stats request to all servers and prints each response.
 
 #### DB Operations
-##### read_collection(table_name, option<filter>)
+##### read_collection(collection_name, option<filter>)
 Reads data from a collection with optional filter parameters.
 
 ```rust
 pub async fn read_collection(
     &self,
-    table_name: &str,
+    collection_name: &str,
     filter: Option<serde_json::Value>
 ) -> Result<Vec<u8>, std::io::Error>
 ```
-##### add_document(table_name, document)
+##### add_document(collection_name, document)
 Adds a document to a collection.
 ```rust
 pub async fn add_document(
     &self,
-    table_name: &str,
+    collection_name: &str,
     document: serde_json::Value
 ) -> Result<Vec<u8>, std::io::Error>
 ```
-##### create_collection(table_name)
+##### create_collection(collection_name)
 Creates a new collection (table) in the database.
 ```rust
 pub async fn create_collection(
     &self,
-    table_name: &str
+    collection_name: &str
 ) -> Result<Vec<u8>, std::io::Error>
 ```
-##### update_document(table_name, document)
+##### update_document(collection_name, document)
 Updates an existing document in a collection. Creates a new one if it doesn't exist.
 ```rust
 pub async fn update_document(
     &self,
-    table_name: &str,
+    collection_name: &str,
     document: serde_json::Value
 ) -> Result<Vec<u8>, std::io::Error>
 ```
 
-##### delete_document(table_name, filter)
+##### delete_document(collection_name, filter)
 Deletes a document from a collection based on a filter.
 ```rust
 pub async fn delete_document(
     &self,
-    table_name: &str,
+    collection_name: &str,
     filter: serde_json::Value
 ) -> Result<Vec<u8>, std::io::Error>
 ```
