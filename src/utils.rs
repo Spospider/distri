@@ -5,7 +5,6 @@ use steganography::util::*;
 use base64;
 use std::error::Error;
 use std::io::Write;
-use std::path::Path;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, Duration, timeout};
 use std::net::SocketAddr;
@@ -14,34 +13,102 @@ use std::collections::HashMap;
 use regex::Regex;
 use tempfile::Builder;
 use std::fs::File as __File;
+use serde_json::{json, to_string};
+use serde::Serialize;
 
-
-
-use image::{
-    DynamicImage,
-    ImageBuffer,
-    Rgba,
-    open
-};
-
-
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
-    platform::run_return::EventLoopExtRunReturn
-};
-// use pixels::{Pixels, SurfaceTexture};
-
-
+/// Constants
 pub const END_OF_TRANSMISSION: &str = "END_OF_TRANSMISSION";
 pub const DEFAULT_TIMEOUT: u64 = 15; // in seconds
 pub const RETRY_INTERVAL:Duration = Duration::from_millis(1000); // in seconds
-
 pub const CHUNK_SIZE: usize = 1024; // in seconds
 pub const MAX_RETRIES: u8 = 5;
-
 pub const FINAL_MSG:&str = "CHUNKS_END";
+
+/// Data structures
+#[derive(Clone)]
+pub struct NodeInfo {
+    pub load: i32,
+    pub id: u16,
+    pub addr: SocketAddr,
+    pub db_version: u32,
+}
+
+#[derive(Debug, thiserror::Error, Clone)]
+pub enum DistriError {
+    // Operational error - issues with processing the request
+    #[error("Operational error: {0}")]
+    OperationalError(String),
+
+    // Validation error - invalid or missing inputs
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+
+    // Network error - network issues such as timeouts or connectivity issues
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
+    // Orchestration error - issues in orchestrating the cloud nodes
+    #[error("Orchestration error: {0}")]
+    OrchestrationError(String),
+}
+impl DistriError {
+    // Method to convert the error into a JSON string
+    pub fn to_json(&self) -> String {
+        match self {
+            DistriError::OperationalError(msg) => {
+                to_string(&json!({"ErrorType": "OperationalError", "Error": msg})).unwrap()
+            }
+            DistriError::ValidationError(msg) => {
+                to_string(&json!({"ErrorType": "ValidationError", "Error": msg})).unwrap()
+            }
+            DistriError::NetworkError(msg) => {
+                to_string(&json!({"ErrorType": "NetworkError", "Error": msg})).unwrap()
+            }
+            DistriError::OrchestrationError(msg) => {
+                to_string(&json!({"ErrorType": "OrchestrationError", "Error": msg})).unwrap()
+            }
+        }
+    }
+}
+impl From<std::io::Error> for DistriError {
+    fn from(err: std::io::Error) -> Self {
+        DistriError::OperationalError(err.to_string())
+    }
+}
+pub enum DBOp {
+    READ,
+    ADD,
+    UPDATE,
+    DELETE,
+    CREATECOLLECTION,
+    DELETECOLLECTION
+}
+impl DBOp {
+    pub fn to_string(&self) -> &str {
+        match self {
+            DBOp::READ => "READ",
+            DBOp::ADD => "ADD",
+            DBOp::UPDATE => "UPDATE",
+            DBOp::DELETE => "DELETE",
+            DBOp::CREATECOLLECTION => "CREATECOLLECTION",
+            DBOp::DELETECOLLECTION => "DELETECOLLECTION",
+        }
+    }
+
+    pub fn from_string(s: &str) -> Option<Self> {
+        match s {
+            "READ" => Some(DBOp::READ),
+            "ADD" => Some(DBOp::ADD),
+            "UPDATE" => Some(DBOp::UPDATE),
+            "DELETE" => Some(DBOp::DELETE),
+            "CREATECOLLECTION" => Some(DBOp::CREATECOLLECTION),
+            "DELETECOLLECTION" => Some(DBOp::DELETECOLLECTION),
+            _ => None,
+        }
+    }
+}
+
+
 
 // Server encrypt: hides second image inside the first image
 pub async fn server_encrypt_img(base_img_path: &str, img_to_hide_path: &str, output_path: &str) {
@@ -298,7 +365,6 @@ pub async fn send_reliable(
 
 
 pub async fn recv_reliable(socket: &UdpSocket, duration:Option<Duration>) -> Result<(Vec<u8>, usize, SocketAddr), io::Error> {
-    // TODO add expected sender behaviour here
     let mut received_data: HashMap<u64, Vec<u8>> = HashMap::new(); // Store received chunks by sequence number
     let mut expected_sequence_number = 0u64;
     let mut address:SocketAddr;
@@ -409,5 +475,23 @@ pub fn extract_args(input: &str) -> Result<HashMap<String, String>, io::Error> {
         // return empty string-string hashmap 
         Ok(HashMap::new())
         // Err(io::Error::new(io::ErrorKind::Other, "No arguments found"))
+    }
+}
+
+
+// A helper function to serialize `Result` into JSON response
+pub fn generate_response<T>(result: Result<T, DistriError>) -> String
+where
+    T: Serialize,
+{
+    match result {
+        Ok(value) => {
+            // If the operation was successful, serialize the result into the "result" field
+            to_string(&json!({"result": value})).unwrap()
+        }
+        Err(e) => {
+            // If an error occurred, serialize the error message
+            e.to_json()
+        }
     }
 }

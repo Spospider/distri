@@ -1,32 +1,32 @@
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, Error, ErrorKind};
 use tokio::time::sleep;
-
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::path::Path;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::net::SocketAddr;
-use std::io::Result;
+// use std::io::Result;
 use std::time::{Duration, Instant};
 use rand::Rng; 
-use serde_json::{json, Value, to_string};
+use serde_json::{json, to_string, Value};
 use colored::*; // Import the trait for coloring
 use uuid::Uuid;
 
-use crate::utils::{DEFAULT_TIMEOUT, END_OF_TRANSMISSION, server_encrypt_img, send_with_retry, recv_with_timeout, recv_reliable, send_reliable, extract_variable, extract_args};
+use crate::utils::{
+    extract_args, 
+    generate_response,
+    recv_reliable, 
+    recv_with_timeout, 
+    send_reliable, 
+    send_with_retry, 
+    DBOp, 
+    DistriError,
+    NodeInfo, 
+    DEFAULT_TIMEOUT, 
+    MAX_RETRIES,
+};
 use crate::service::Service;
 
 
-#[derive(Clone)]
-pub struct NodeInfo {
-    pub load: i32,
-    pub id: u16,
-    pub addr: SocketAddr,
-    pub db_version: u32,
-}
 
 
 pub struct CloudNode {
@@ -64,7 +64,7 @@ impl CloudNode {
         nodes: Option<HashMap<String, SocketAddr>>,
         _chunk_size: usize,
         collection_names: Option<Vec<&str>>,
-    ) -> Result<Arc<Self>> {
+    ) -> Result<Arc<Self>, DistriError> {
         // let initial_nodes = nodes.unwrap_or_else(HashMap::new);
         let initial_nodes: HashMap<String, NodeInfo> = nodes
             .unwrap_or_else(HashMap::new)
@@ -121,7 +121,7 @@ impl CloudNode {
     }
 
     /// Starts the server to listen for incoming requests, elect a leader, and process data
-    pub async fn serve(self: &Arc<Self>) -> Result<()> {
+    pub async fn serve(self: &Arc<Self>) -> Result<(), DistriError> {
         println!("Listening for incoming info requests on {:?}", self.public_socket.local_addr());
 
         // initialize request queue, multi-sender, multi receiver.
@@ -319,8 +319,11 @@ impl CloudNode {
                     if received_msg.starts_with("ReqMem: CreateCollection") || received_msg.starts_with("ReqMem: AddDocument") || received_msg.starts_with("ReqMem: DeleteDocument") || received_msg.starts_with("ReqMem: ReadCollection") {
                     // election slows things down a lot
                         let node = proc_self.clone();
+                        // save prev state, and set false immediately to avoid race conditions on the elected var.
+                        let prev_elected = proc_self.elected.lock().await.clone();
+                        *proc_self.elected.lock().await = false;
                         tokio::spawn(async move {
-                            node.elect_leader(Some(true)).await;
+                            node.elect_leader(Some(true), Some(prev_elected)).await;
                         });
                     }
 
@@ -422,6 +425,7 @@ impl CloudNode {
  // election stuff
     // Retrieves updated information from all nodes using TCP messages
     async fn get_info(self: &Arc<Self>) {
+        
         let node_addresses: Vec<(String, SocketAddr)> = {
             let nodes = self.nodes.lock().await;
             nodes.iter().map(|(id, info)| (id.clone(), info.addr)).collect()
@@ -443,6 +447,7 @@ impl CloudNode {
             // match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
             let _ = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, _)) => {
+                    let mut mydata_version = self.db_data_version.lock().await;
                     let data = &packet[..size];
                     // Convert data to JSON
                     let json_obj: Value = match serde_json::from_slice(data) {
@@ -456,7 +461,7 @@ impl CloudNode {
                     // let updated load = json_obj['load']
                     let updated_load:i32 = json_obj.get("load").unwrap().as_i64().unwrap() as i32;
                     // sync DB 
-                    if json_obj.get("db_version").unwrap().as_u64().unwrap() > *self.db_data_version.lock().await as u64 {
+                    if json_obj.get("db_version").unwrap().as_u64().unwrap() > mydata_version.clone() as u64 {
                         // update   self.collections: Arc<Mutex<HashMap<String, Vec<Value>>>>, from json_obj.get("collections") which is created from serializing self.collections.lock().await.clone(),
                         if let Some(new_collections) = json_obj.get("collections").and_then(|v| v.as_object()) {
                             let mut collections_lock = self.collections.lock().await;
@@ -475,7 +480,7 @@ impl CloudNode {
                             eprintln!("Failed to update collections: 'collections' field is missing or not an object");
                             // Handle error appropriately (e.g., skip updating or log error)
                         }
-                        *self.db_data_version.lock().await = json_obj.get("db_version").unwrap().as_u64().unwrap() as u32;
+                        *mydata_version = json_obj.get("db_version").unwrap().as_u64().unwrap() as u32;
                     }
     
                     let mut nodes = self.nodes.lock().await;
@@ -486,11 +491,11 @@ impl CloudNode {
                     }
                     // (packet, size, recv_addr)
                 },
-                Ok((_, _, recv_addr)) => {
-                    eprintln!("Received data from unexpected address: {:?}", recv_addr);
-                    // Ignore and continue to wait for correct address
-                    // (0, 0, recv_addr)
-                },
+                // Ok((_, _, recv_addr)) => {
+                //     eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                //     // Ignore and continue to wait for correct address
+                //     // (0, 0, recv_addr)
+                // },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     eprintln!("{}", "getinfo operation timed out".yellow());
                 },
@@ -502,8 +507,8 @@ impl CloudNode {
     }
 
     /// Handles incoming TCP requests for node information
-    async fn handle_info_request(self: &Arc<Self>, addr: SocketAddr) -> Result<()> {
-        println!("Received info request from {}", addr);
+    async fn handle_info_request(self: &Arc<Self>, addr: SocketAddr) -> Result<(), DistriError> {
+        println!("Received info request from {}", addr);        
 
         let load = *self.completed.lock().await as i32 - *self.requests.lock().await as i32; // order is reversedd as the min value is selected
         // update own load, in var and in node table
@@ -513,17 +518,23 @@ impl CloudNode {
         if let Some(node_info) = nodes.get_mut(&myid) {
             node_info.load = load;
         }
-
+        let data_version: u32;
+        let collections: HashMap<String, Vec<Value>>;
+        {
+            let _data_version = self.db_data_version.lock().await; // the data_version lock is the main lock for db operatiosn, it should always be captured first.
+            data_version = _data_version.clone();
+            collections = self.collections.lock().await.clone();
+        } 
         let response = to_string(&json!({
             "load": load,
             "id": myid,
-            "collections": self.collections.lock().await.clone(),
-            "db_version" : self.db_data_version.lock().await.clone(),
+            "collections": collections,
+            "db_version" : data_version,
         })).unwrap();
         let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
 
         // Send the response back to the requesting node
-        // send_with_retry(&socket, response.as_bytes(), addr, 5).await?;
+        // send_with_retry(&socket, response.as_bytes(), addr, MAX_RETRIES).await?;
         send_reliable(&socket, response.as_bytes(), addr).await?;
         println!("Sent info response to {}: {}", addr, response);
 
@@ -531,12 +542,14 @@ impl CloudNode {
     }
 
     /// Elects the leader node based on the lowest load value, breaking ties with the lowest id
-     
-    async fn elect_leader(self: &Arc<Self>, for_db:Option<bool>) {
+    async fn elect_leader(self: &Arc<Self>, for_db:Option<bool>, prev_elected:Option<bool>) {
         println!("{}", "elect_leader1".yellow());
         let mut elected = self.elected.lock().await;
         if !self.time_to_update.lock().await.clone() && self.db_data_version.lock().await.clone() > 0 {
             println!("{} {}", "skipped election".yellow(), elected);
+            if let Some(elect_val) = prev_elected {
+                *elected = elect_val;
+            }
             return;
         }
         *self.time_to_update.lock().await = false;
@@ -557,12 +570,12 @@ impl CloudNode {
         *elected = self.election_alg(for_db).await; // Elect a leader based on load and id values
         println!("{} {}","elected value:".yellow(), elected);
         // *self.electing.lock().await = false;
-        let ttu = Arc::clone(&self.time_to_update);
+        let newself = self.clone();
         tokio::spawn(
             async move {
-            // Sleep for 5 seconds
+            // Sleep for n seconds
             sleep(Duration::from_secs(1)).await;
-            *ttu.lock().await = true;
+            *newself.time_to_update.lock().await = true;
         });
     }
 
@@ -572,6 +585,8 @@ impl CloudNode {
         let mut lowest_load = self.load.lock().await.clone();
         let mut elected_node = self.id.lock().await.clone();
         let mut highest_db_version = self.db_data_version.lock().await.clone();
+        let my_db_version = highest_db_version.clone();
+
         // println!("{}", "election2".yellow());
 
         for (_, node_info) in nodes.iter() {
@@ -594,7 +609,7 @@ impl CloudNode {
         let elected = *self.id.lock().await == elected_node;
         // println!("{} {}","elected node:".yellow(), elected_node);
         if Some(true) == for_db {
-            if *self.db_data_version.lock().await >= highest_db_version {
+            if my_db_version >= highest_db_version {
                 return true;
             }
             else {
@@ -603,33 +618,77 @@ impl CloudNode {
         }
         return elected;        
     }
- // end election stuff
 
+    async fn DB_sync_publish(self: &Arc<Self>, op: DBOp, data:Value, db_version:u32) {
+        if let Some(packet) = json!({
+                "data" : data,
+                "db_version" : db_version,
+                "op" : op.to_string()
+            }).as_str() {
 
-    /// Handle an incoming connection, aggregate the data, process it, and send a response
-    async fn handle_encryption(self: &Arc<Self>, addr: SocketAddr) -> Result<()> {
-        println!("Processing request from client: {}", addr);
+            let node_addresses: Vec<(String, SocketAddr)> = {
+                let nodes = self.nodes.lock().await;
+                nodes.iter().map(|(id, info)| (id.clone(), info.addr)).collect()
+            };
 
-        // Establish a connection to the client for sending responses
-        let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
-        println!("Established connection with client on {}", socket.local_addr()?);
-
-        // Send "OK" message to the client to indicate we are ready to receive data
-        send_with_retry(&socket, b"OK", addr, 5).await?;
-        println!("Sent 'OK' message for Encrypt to {}", addr);
-
-        let (aggregated_data, _, _) = recv_reliable(&socket, Some(Duration::from_secs(5))).await?;
-        // Increment accepted
-        *self.accepted.lock().await += 1;
-
-        // Process the aggregated data
-        let processed_data = self.process_img(aggregated_data).await;
-        send_reliable(&socket, &processed_data, addr).await?;
-
-        *self.completed.lock().await += 1;
-        println!("Done handling Encrypt for: {}", addr);
-        Ok(())
+            let socket: UdpSocket = match UdpSocket::bind("0.0.0.0:0").await {
+                Ok(socket) => socket,
+                Err(e) =>{
+                    eprintln!("Couldn't allocate socket in DB_sync_publish: {}", e);
+                    return;
+                }
+            };
+            let mut reqmsg = String::from("RegInternal: DBSync |");
+            reqmsg.push_str(packet);
+            for (_, addr) in node_addresses {
+                if addr == self.public_socket.local_addr().unwrap() {
+                    continue;
+                }
+                send_with_retry(&socket, reqmsg.as_bytes(), addr, MAX_RETRIES).await.unwrap_or_default();
+            }
+        }
     }
+
+    async fn DB_sync_listener(self: &Arc<Self>, msg:&str) {
+        let parts: Vec<&str> = msg.splitn(2, '|').collect();
+        
+        if parts.len() < 2 {
+            // If the message doesn't contain at least two parts, log or handle the error.
+            eprintln!("Invalid message format: {}", msg);
+            return;
+        }
+        let packet: Value = serde_json::from_str(parts[1]).unwrap_or_else(|e| {
+            // If deserialization fails, log the error and return.
+            eprintln!("Failed to deserialize message: {}", e);
+            Value::Null
+        });
+
+        let op = DBOp::from_string(packet["op"].as_str().unwrap_or_default());
+        if op.is_none() {
+            return;
+        }
+
+        match op.unwrap() {
+            DBOp::ADD => {
+
+            },
+            DBOp::UPDATE => {
+                // check if "UUID" entry is in packet["data"]
+            },
+            DBOp::DELETE => {
+                // check if "UUID" entry is in packet["data"]
+            },
+            DBOp::CREATECOLLECTION => {
+                // check if "name" entry is in packet["data"]
+                //
+            },
+            DBOp::DELETECOLLECTION => {
+                // check if "name" entry is in packet["data"]
+            },
+            _ =>{}
+        }
+    }
+ // end election stuff
 
     /// Handle an incoming connection, aggregate the data, process it, and send a response
     async fn handle_service(
@@ -637,7 +696,7 @@ impl CloudNode {
         service: &Arc<dyn Service>, 
         args: HashMap<String, String>, 
         addr: SocketAddr
-    ) -> Result<()> {
+    ) -> Result<(), DistriError> {
         println!("Processing request from client: {}", addr);
 
         // Establish a connection to the client for sending responses
@@ -645,7 +704,7 @@ impl CloudNode {
         println!("Established connection with client on {}", socket.local_addr()?);
 
         // Send "OK" message to the client to indicate we are ready to receive data
-        send_with_retry(&socket, b"OK", addr, 5).await?;
+        send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
         println!("Sent 'OK' message for Encrypt to {}", addr);
 
         let (aggregated_data, _, _) = recv_reliable(&socket, Some(Duration::from_secs(5))).await?;
@@ -676,7 +735,7 @@ impl CloudNode {
     }
 
     /// Handle an incoming connection, aggregate the data, process it, and send a response
-    async fn handle_stats(self: &Arc<Self>, addr: SocketAddr) -> Result<()> {
+    async fn handle_stats(self: &Arc<Self>, addr: SocketAddr) -> Result<(), DistriError> {
         println!("Processing stats request from client: {}", addr);
 
         // Establish a connection to the client for sending responses
@@ -713,7 +772,9 @@ impl CloudNode {
             Server Fails: {}\n\
             Total Task Time: {:.2?}\n\
             Avg Completion Time: {:.2?}\n
-            DB Data: {}\n",
+            DB Data: {}\n
+            DB Version: {}\n",
+            
             requests,
             accepted,
             completed,
@@ -722,10 +783,11 @@ impl CloudNode {
             total_time,
             avg_completion_time,
             table_stats,
+            self.db_data_version.lock().await.clone(),
         );
     
         // Send the stats report back to the client
-        send_with_retry(&socket, stats_report.as_bytes(), addr, 5).await?;
+        send_with_retry(&socket, stats_report.as_bytes(), addr, MAX_RETRIES).await?;
         println!("done handling connection for: {}", addr);
         Ok(())
     }
@@ -737,34 +799,13 @@ impl CloudNode {
         return copy;
     }
 
-    async fn process_img(&self, data: Vec<u8>) -> Vec<u8> {
-        let img_path = "files/to_encrypt.jpg";
-        let output_path = "files/encrypted_output.png";
-    
-        // Step 1: Write data bytes to a file (e.g., 'to_encrypt.png')
-        // TODO only do this if file does not exist
-        if !Path::new(img_path).exists() {
-            let mut file = File::create(img_path).await.unwrap();
-            file.write_all(&data).await.unwrap();
-        
-            // Step 2: Call `server_encrypt_img` to perform encryption on the file
-            server_encrypt_img("files/placeholder.jpg", img_path, output_path).await;
-        }
 
-        // Step 3: Read the encrypted output file as bytes
-        let mut encrypted_file = File::open(output_path).await.unwrap();
-        let mut encrypted_data = Vec::new();
-        encrypted_file.read_to_end(&mut encrypted_data).await.unwrap();
-    
-        encrypted_data
-    }
-
-    // Add a table
-    async fn db_add_table(&self, addr: SocketAddr) -> Result<Option<String>> { // change return type to option?
+    // Cloud DB request handlers
+    async fn db_add_table(&self, addr: SocketAddr) -> Result<Option<String>, DistriError> { // change return type to option?
 
         // send ok
         let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
-        send_with_retry(&socket, b"OK", addr, 5).await?;
+        send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
         println!("Sent 'OK' message for AddCollection to {}", addr);
         
         // receive data
@@ -773,6 +814,7 @@ impl CloudNode {
             let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     // Successfully received data from the correct client
+                    let mut my_data_version = self.db_data_version.lock().await;
                     let collection_name: &str = &String::from_utf8_lossy(&packet);
 
                     let mut collections = self.collections.lock().await;
@@ -784,7 +826,7 @@ impl CloudNode {
                     } else {
                         collections.insert(collection_name.to_string(), Vec::new());
                         // update data version with any change in DB
-                        *self.db_data_version.lock().await += 1;
+                        *my_data_version += 1;
                         // reply to sender
                         let response = format!("collection '{}' created.", collection_name);
                         send_reliable(&socket, response.as_bytes(), addr).await?;
@@ -810,95 +852,71 @@ impl CloudNode {
 
     }
     // Add an entry to a specific table
-    async fn db_add_entry(&self, args: HashMap<String, String>,  addr: SocketAddr) -> Result<String> { // change to option so that ? delegates errors to above function
+    async fn db_add_entry(&self, args: HashMap<String, String>,  addr: SocketAddr) -> Result<String, DistriError> { // change to option so that ? delegates errors to above function
         // Process input var
         println!("IN db_add_entry");
         let collection_name = &args["table"];
 
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         // send ok
-        send_with_retry(&socket, b"OK", addr, 5).await?;
+        send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
         println!("{:?} Sent 'OK' message for AddEntry to {}", socket.local_addr(), addr);
 
         // recieve data
         // Loop to ensure we get data from the correct client
         for _ in 0..5 {
-            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
+            let _ = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
+                    let mut my_data_version = self.db_data_version.lock().await;
                     println!("done recieving");
                     let packet = packet[..size].to_vec();
-                    let data: String = String::from_utf8_lossy(&packet).trim().to_string();
                     
                     let mut entry: Value = match serde_json::from_slice(&packet) {
                         Ok(value) => value, // Only proceed if it's an object
                         Err(e) => {
-                            eprintln!("Failed to parse JSON: {:?}", e);
-
                             // reply to sender
-                            let response = format!("Error:Failed to parse JSON: {:?}", e);
-                            send_reliable(&socket, response.as_bytes(), addr).await?;
-                            return Err(Error::new(ErrorKind::Other, "Failed to parse JSON"));
+                            let response = format!("Failed to parse JSON: {:?}", e);
+                            send_reliable(&socket, DistriError::ValidationError(response.clone()).to_json().as_bytes(), addr).await?;
+                            return Err(DistriError::ValidationError(response));
                         }
                     };
-                    
-                    // Add random uuid
-                    let mut uuid = Uuid::new_v4().to_string();
-                    if let Value::Object(ref mut obj) = entry {
-                        // if UUID does not exist in obj
-                        if !obj.contains_key("UUID") {
-                            obj.insert("UUID".to_string(), Value::String(uuid.clone()));
-                        }
-                        else {
-                            uuid = obj["UUID"].as_str().unwrap().to_string();
-                        }
+
+                    let op_result = self.add_doc(collection_name, entry).await;
+                    if op_result.is_ok() {
+                        *my_data_version += 1;
                     }
-
-                    let mut collections = self.collections.lock().await;
-                    if let Some(table) = collections.get_mut(collection_name) {
-                        table.push(entry);
-                        // update data version with any change in DB
-                        *self.db_data_version.lock().await += 1;
-                        println!("Added Doc: {}", data);
-
-                        // reply to sender
-                        let response = "Document added successfully".to_string();
-                        println!("Sending Reply to {:?}", addr);
-                        send_reliable(&socket, uuid.as_bytes(), addr).await?;
-                        return Ok(response);
-                    } else {
-                        // reply to sender
-                        let response = format!("collection '{}' does not exist.", collection_name);
-                        send_reliable(&socket, response.as_bytes(), addr).await?;
-                        return Ok(response);
-                    }
-
+                    // send response back to client
+                    send_reliable(&socket, generate_response(op_result).as_bytes(), addr).await?;
                 }, // Successfully received data
                 Ok((_, _, recv_addr)) => {
                     eprintln!("Received data from unexpected address: {:?}", recv_addr);
                     // Ignore and continue to wait for correct address
-                    (0, 0, recv_addr)
+                    ()
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     eprintln!("Receive operation timed out");
-                    return Err(Error::new(ErrorKind::Other, "Receive operation timed out"));
+                    return Err(DistriError::NetworkError("Receive operation timed out".to_string()));
                 },
                 Err(e) => {
                     eprintln!("Failed to receive data: {:?}", e);
-                    return Err(Error::new(ErrorKind::Other, "No variable supplied"));
+                    return Err(DistriError::OperationalError(format!(
+                        "Failed to receive data: {:?}",
+                        e
+                    )));
                 }
             };
         }
-        return Err(Error::new(ErrorKind::Other, "Client did not communicate"));
+        return Err(DistriError::OrchestrationError("Client did not Communicate".to_string()));
     }
 
     // Update an entry in a specific table
-    async fn db_update_entry(&self, args: HashMap<String, String>, addr: SocketAddr) -> Result<String> {
+    async fn db_update_entry(&self, args: HashMap<String, String>, addr: SocketAddr) -> Result<String, DistriError> {
         // Process input variable
         let collection_name = &args["table"];
 
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         // Send OK response
-        send_with_retry(&socket, b"OK", addr, 5).await?;
+        send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
         println!("{:?} Sent 'OK' message for UpdateEntry to {}", socket.local_addr(), addr);
 
         // Receive data
@@ -907,6 +925,7 @@ impl CloudNode {
             let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     println!("Done receiving");
+                    let mut my_data_version = self.db_data_version.lock().await;
                     let packet = packet[..size].to_vec();
                     let data: String = String::from_utf8_lossy(&packet).trim().to_string();
                     
@@ -916,80 +935,19 @@ impl CloudNode {
                             eprintln!("Failed to parse JSON: {:?}", e);
 
                             // Reply to sender
-                            let response = format!("Error:Failed to parse JSON: {:?}", e);
-                            send_reliable(&socket, response.as_bytes(), addr).await?;
-                            return Err(Error::new(ErrorKind::Other, "Failed to parse JSON"));
+                            let err = DistriError::ValidationError(format!("Error:Failed to parse JSON: {:?}", e));
+                            send_reliable(&socket, err.to_json().as_bytes(), addr).await?;
+                            return Err(err);
                         }
                     };
 
-                    // Extract ID for matching
-                    let id: String = if let Value::Object(ref obj) = entry_to_update {
-                        if let Some(Value::String(id)) = obj.get("UUID") {
-                            id.clone()
-                        } else {
-                            // Reply to sender
-                            let response = "Error: No valid 'UUID' field found in JSON".to_string();
-                            send_reliable(&socket, response.as_bytes(), addr).await?;
-                            return Err(Error::new(ErrorKind::Other, "No valid 'UUID' field found in JSON"));
-                        }
-                    } else {
-                        // Reply to sender
-                        let response = "Error: JSON must be an object".to_string();
-                        send_reliable(&socket, response.as_bytes(), addr).await?;
-                        return Err(Error::new(ErrorKind::Other, "JSON must be an object"));
-                    };
-
-                    let mut collections = self.collections.lock().await;
-                    if let Some(table) = collections.get_mut(collection_name) {
-                        // Find the entry to update
-                        if let Some(existing_entry) = table.iter_mut().find(|doc| {
-                            if let Value::Object(ref obj) = doc {
-                                println!("Comparing uuids {:?} == {:?}", obj.get("UUID").unwrap().as_str().unwrap_or("NULL") , id.clone().as_str());
-                                obj.get("UUID").unwrap().as_str().unwrap_or("NULL") == id.clone().as_str()
-                            } else {
-                                false
-                            }
-                        }) {
-                            *existing_entry = entry_to_update; // Replace the entry
-                            // Update data version
-                            *self.db_data_version.lock().await += 1;
-                            println!("Updated Doc: {}", data);
-
-                            // Reply to sender
-                            let response = "Document updated successfully".to_string();
-                            println!("Sending Reply to {:?}", addr);
-                            send_reliable(&socket, response.as_bytes(), addr).await?;
-                            return Ok(response);
-                        } else { // match not found, add to collection anyway
-                            // Add random uuid
-                            let mut uuid = Uuid::new_v4().to_string();
-                            if let Value::Object(ref mut obj) = entry_to_update {
-                                // if UUID does not exist in obj
-                                if !obj.contains_key("UUID") {
-                                    obj.insert("UUID".to_string(), Value::String(uuid.clone()));
-                                }
-                                else {
-                                    uuid = obj["UUID"].as_str().unwrap().to_string();
-                                }
-                            }
-                            table.push(entry_to_update);
-                            // update data version with any change in DB
-                            *self.db_data_version.lock().await += 1;
-                            println!("Added Doc: {}", data);
-
-                            // reply to sender
-                            let response = "Document added successfully".to_string();
-                            println!("Sending Reply to {:?}", addr);
-                            send_reliable(&socket, uuid.as_bytes(), addr).await?;
-                            return Ok(response);
-
-                        }
-                    } else {
-                        // Reply to sender
-                        let response = format!("collection '{}' does not exist.", collection_name);
-                        send_reliable(&socket, response.as_bytes(), addr).await?;
-                        return Ok(response);
+                    let op_result = self.update_doc(collection_name, entry_to_update).await;
+                    if op_result.is_ok() {
+                        *my_data_version += 1;
                     }
+                    send_reliable(&socket, generate_response(op_result.clone()).as_bytes(), addr).await?;
+                    
+                    return op_result;
 
                 }, // Successfully received data
                 Ok((_, _, recv_addr)) => {
@@ -999,33 +957,34 @@ impl CloudNode {
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                     eprintln!("Receive operation timed out");
-                    return Err(Error::new(ErrorKind::Other, "Receive operation timed out"));
+                    return Err(DistriError::NetworkError("Receive operation timed out".to_string()));
                 },
                 Err(e) => {
                     eprintln!("Failed to receive data: {:?}", e);
-                    return Err(Error::new(ErrorKind::Other, "No variable supplied"));
+                    return Err(DistriError::ValidationError("No variable supplied".to_string()));
                 }
             };
         }
-        return Err(Error::new(ErrorKind::Other, "Client did not communicate"));
+        return Err(DistriError::OrchestrationError("Client did not communicate".to_string()));
     }
     
     // Add an entry to a specific table
-    async fn db_delete_entry(&self, args: HashMap<String, String>,  addr: SocketAddr) -> Result<String> { // change to option so that ? delegates errors to above function
+    async fn db_delete_entry(&self, args: HashMap<String, String>,  addr: SocketAddr) -> Result<String, DistriError> { // change to option so that ? delegates errors to above function
         // Process input var
         let collection_name = &args["table"];
 
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
 
         // send ok
-        send_with_retry(&socket, b"OK", addr, 5).await?;
+        send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
         println!("Sent 'OK' message for AddEntry to {}", addr);
 
         // recieve data
         // Loop to ensure we get data from the correct client
         for _ in 0..5 {
-            let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
+            let _ = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
+                    let mut my_data_version = self.db_data_version.lock().await;
                     let packet = packet[..size].to_vec();
                     
                     let entry: Value = match serde_json::from_slice(&packet) {
@@ -1034,80 +993,42 @@ impl CloudNode {
                             eprintln!("Failed to parse JSON: {:?}", e);
 
                             // reply to sender
-                            let response = format!("Error:Failed to parse JSON: {:?}", e);
-                            send_reliable(&socket, response.as_bytes(), addr).await?;
-                            return Err(Error::new(ErrorKind::Other, "Failed to parse JSON"));
+                            let response = format!("Failed to parse JSON: {:?}", e);
+                            send_reliable(&socket, DistriError::ValidationError(response.clone()).to_json().as_bytes(), addr).await?;
+                            return Err(DistriError::ValidationError(response));
                         }
                     };
 
-                    // Ensure `entry` is a JSON object for matching
-                    let entry_object = match entry.as_object() {
-                        Some(obj) => obj,
-                        None => {
-                            let response = format!("Error:Entry is not a JSON object {:?}", entry);
-                            send_reliable(&socket, response.as_bytes(), addr).await?;
-                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Entry must be a JSON object"));
-                        }
-                    };
-                    
-                    let mut collections = self.collections.lock().await;
-                    if let Some(table) = collections.get_mut(collection_name) {
-                        // entry represents dict on fields to match on 
-                        // example: { "provider" : "abc" }
-
-                        // Retain only entries that do NOT match all the fields in `entry_object`
-                        table.retain(|existing_entry| {
-                            !existing_entry.as_object().map_or(false, |existing_fields| {
-                                entry_object.iter().all(|(key, value)| {
-                                    existing_fields.get(key) == Some(value)
-                                })
-                            })
-                        });
-
-                        // update data version with any change in DB
-                        *self.db_data_version.lock().await += 1;
-                        println!("Deleted Docs matching: {}", entry);
-                        println!("Docs: {:?}", collections.get_mut(collection_name));
-
-                        // reply to sender
-                        let response = "Docs deleted successfully.".to_string();
-                        send_reliable(&socket, response.as_bytes(), addr).await?;
-                        return Ok(response);
-                    } else {
-                        // reply to sender
-                        let response = format!("collection '{}' does not exist.", collection_name);
-                        send_reliable(&socket, response.as_bytes(), addr).await?;
-                        return Ok(response);
+                    let op_result = self.delete_doc(collection_name, entry).await;
+                    if op_result.is_ok() {
+                        *my_data_version += 1;
                     }
-
+                    send_reliable(&socket, generate_response(op_result).as_bytes(), addr).await?;
                 }, // Successfully received data
                 Ok((_, _, recv_addr)) => {
-                    eprintln!("Received data from unexpected address: {:?}", recv_addr);
                     // Ignore and continue to wait for correct address
-                    (0, 0, recv_addr)
+                    ()
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    eprintln!("Receive operation timed out");
-                    return Err(Error::new(ErrorKind::Other, "Receive operation timed out"));
+                    return Err(DistriError::NetworkError("Receive operation timed out".to_string()));
                 },
                 Err(e) => {
-                    eprintln!("Failed to receive data: {:?}", e);
-                    return Err(Error::new(ErrorKind::Other, "No variable supplied"));
+                    return Err(e.into());
                 }
             };
         }
-        return Err(Error::new(ErrorKind::Other, "Client did not communicate"));
+        return Err(DistriError::OrchestrationError("Client did not communicate".to_string()));
     }
     
 
     // Read a table and return it as a JSON array
-    async fn db_read_table(&self, args: HashMap<String, String>, addr: SocketAddr) -> Result<String> {
+    async fn db_read_table(&self, args: HashMap<String, String>, addr: SocketAddr) -> Result<String, DistriError> {
         // Extract table name from the received packet as a string
         let collection_name = &args["table"];
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
 
         // send ok
-        send_with_retry(&socket, b"OK", addr, 5).await?;
+        send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
         println!("Sent 'OK' message for AddEntry to {}", addr);
 
         // if there is filtering info
@@ -1121,74 +1042,192 @@ impl CloudNode {
                         eprintln!("Failed to parse JSON: {:?}", e);
 
                         // reply to sender
-                        let response = format!("Error:Failed to parse JSON: {:?}", e);
-                        send_reliable(&socket, response.as_bytes(), addr).await?;
-                        return Err(Error::new(ErrorKind::Other, "Failed to parse JSON"));
+                        let response = format!("Failed to parse JSON: {:?}", e);
+                        send_reliable(&socket, DistriError::ValidationError(response.clone()).to_json().as_bytes(), addr).await?;
+                        return Err(DistriError::ValidationError(response));
                     }
                 };
-
-                // Ensure `entry` is a JSON object for matching
-                let entry_object = match entry.as_object() {
-                    Some(obj) => obj,
-                    None => {
-                        let response = format!("Error:Entry is not a JSON object {:?}", entry);
-                        send_reliable(&socket, response.as_bytes(), addr).await?;
-                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Entry must be a JSON object"));
-                    }
-                };
-
-                let mut collections = self.collections.lock().await;
-                if let Some(table) = collections.get_mut(collection_name) {
-                    // entry represents dict on fields to match on 
-                    // example: { "provider" : "abc" }
-
-                    // get only entries that do NOT match all the fields in `entry_object`
-                    let matched_entries: Vec<Value> = table.iter().filter(|existing_entry| {
-                        // Check if the existing entry is a JSON object
-                        existing_entry.as_object().map_or(false, |existing_fields| {
-                            // Ensure all fields in `entry_object` match the corresponding fields in `existing_fields`
-                            entry_object.iter().all(|(key, value)| {
-                                existing_fields.get(key) == Some(value)
-                            })
-                        })
-                    }).cloned().collect();
-
-                    // reply to sender
-                    let response = Value::Array(matched_entries).to_string();
-                    send_reliable(&socket, response.as_bytes(), addr).await?;
-                    return Ok(response);
-                }
-                else {
-                    // reply to sender
-                    let response = format!("collection '{}' does not exist.", collection_name);
-                    send_reliable(&socket, response.as_bytes(), addr).await?;
-                    return Ok(response);
-                }
+                let _my_db_version = self.db_data_version.lock().await;
+                let op_result = self.read_docs(collection_name, entry).await;
+                send_reliable(&socket, generate_response(op_result).as_bytes(), addr).await?;
             },
             Ok((_, _, recv_addr)) => {
-                // eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                eprintln!("Received data from unexpected address: {:?}", recv_addr);
                 // // Ignore and continue to wait for correct address
-                (0, 0, recv_addr)
+                ()
             },
             Err(_) => {
-                (0, 0, "0.0.0.0:0".parse().unwrap())
+                ()
+            }
+        };
+        Err(DistriError::OrchestrationError("Client did not communicate".to_string()))
+    }
+
+
+    /// Immediate DB ops
+    async fn add_doc(&self, collection_name:&str, mut entry: Value) -> Result<String, DistriError> {
+        let mut my_data_version = self.db_data_version.lock().await;
+
+        // Add random uuid
+        let mut uuid= String::from("");
+        if let Value::Object(ref mut obj) = entry {
+            // if UUID does not exist in obj
+            if !obj.contains_key("UUID") {
+                uuid = Uuid::new_v4().to_string();
+                obj.insert("UUID".to_string(), Value::String(uuid.clone()));
+            }
+            else {
+                uuid = obj["UUID"].as_str().unwrap().to_string();
+            }
+        }
+
+        let mut collections = self.collections.lock().await;
+        if let Some(table) = collections.get_mut(collection_name) {
+            table.push(entry);
+            // update data version with any change in DB
+            *my_data_version += 1;
+            println!("Added Doc: {}", uuid);
+
+            // reply to sender
+            return Ok(uuid);
+        } else {
+            // reply to sender
+            let response = format!("collection '{}' does not exist.", collection_name);
+            // retrun error properly here
+            return Err(DistriError::ValidationError(response));
+        }
+    }
+
+    async fn update_doc(&self, collection_name:&str, mut entry: Value) -> Result<String, DistriError> {
+        // Extract ID for matching
+        let id: String = if let Value::Object(ref obj) = entry {
+            if let Some(Value::String(id)) = obj.get("UUID") {
+                id.clone()
+            } else {
+                return Err(DistriError::ValidationError("No valid 'UUID' field found in JSON".to_string()));
+            }
+        } else {
+            return Err(DistriError::ValidationError("JSON must be an object".to_string()));
+        };
+
+        let mut collections = self.collections.lock().await;
+        if let Some(table) = collections.get_mut(collection_name) {
+            // Find the entry to update
+            if let Some(existing_entry) = table.iter_mut().find(|doc| {
+                if let Value::Object(ref obj) = doc {
+                    println!("Comparing uuids {:?} == {:?}", obj.get("UUID").unwrap().as_str().unwrap_or("NULL") , id.clone().as_str());
+                    obj.get("UUID").unwrap().as_str().unwrap_or("NULL") == id.clone().as_str()
+                } else {
+                    false
+                }
+            }) {
+                *existing_entry = entry; // Replace the entry
+                // Reply to sender
+                let response = "Document updated successfully".to_string();
+                return Ok(response);
+            } else { // match not found, add to collection anyway
+                // Add random uuid
+                let mut uuid = Uuid::new_v4().to_string();
+                if let Value::Object(ref mut obj) = entry {
+                    // if UUID does not exist in obj
+                    if !obj.contains_key("UUID") {
+                        obj.insert("UUID".to_string(), Value::String(uuid.clone()));
+                    }
+                    else {
+                        uuid = obj["UUID"].as_str().unwrap().to_string();
+                    }
+                }
+                table.push(entry);
+
+                // reply to sender
+                let response = "Document added successfully".to_string();
+                return Ok(response);
+            }
+        } else {
+            // Reply to sender
+            let response = format!("collection '{}' does not exist.", collection_name);
+            return Err(DistriError::ValidationError(response));
+        }
+    }
+
+    async fn delete_doc(&self, collection_name:&str, entry: Value) -> Result<String, DistriError> {
+        // Ensure `entry` is a JSON object for matching
+        let entry_object = match entry.as_object() {
+            Some(obj) => obj,
+            None => {
+                let response = format!("Entry is not a JSON object {:?}", entry);
+                return Err(DistriError::ValidationError(response));
             }
         };
         
-        // fetch all data
-        // Access the collections and attempt to fetch the requested table
-        let collections = self.collections.lock().await.clone();
-        if let Some(table) = collections.get(collection_name) {
-            // Convert the Vec<Value> to a JSON array and return it
+        let mut collections = self.collections.lock().await;
+        if let Some(table) = collections.get_mut(collection_name) {
+            // entry represents dict on fields to match on 
+            // example: { "provider" : "abc" }
+
+            // Retain only entries that do NOT match all the fields in `entry_object`
+            table.retain(|existing_entry| {
+                !existing_entry.as_object().map_or(false, |existing_fields| {
+                    entry_object.iter().all(|(key, value)| {
+                        existing_fields.get(key) == Some(value)
+                    })
+                })
+            });
+
             // reply to sender
-            let response = Value::Array(table.clone()).to_string();
-            send_reliable(&socket, response.as_bytes(), addr).await?;
-            Ok(format!("collection '{}' read by {}", collection_name, addr))
+            let response = "Docs deleted successfully.".to_string();
+            return Ok(response);
         } else {
-            // Return an error if the table doesn't exist
-            let response = format!("collection '{}' not found.", collection_name);
-            send_reliable(&socket, response.as_bytes(), addr).await?;
-            Err(Error::new(ErrorKind::NotFound, response))
+            // reply to sender
+            let response = format!("collection '{}' does not exist.", collection_name);
+            return Err(DistriError::ValidationError(response))
+        }
+    }
+
+    async fn read_docs(&self, collection_name:&str, entry: Value) -> Result<String, DistriError> {
+        let entry_object = match entry.as_object() {
+            Some(obj) => obj,
+            None => {
+                return Err(DistriError::ValidationError("Entry must be a JSON object".to_string()));
+            }
+        };
+
+        let mut collections = self.collections.lock().await;
+        if entry_object.is_empty() {
+            // fetch all data
+            if let Some(table) = collections.get(collection_name) {
+                // Convert the Vec<Value> to a JSON array and return it
+                let response = Value::Array(table.clone()).to_string();
+                return Ok(response)
+            } else {
+                // Return an error if the table doesn't exist
+                let response = format!("collection '{}' does not exist.", collection_name);
+                return Err(DistriError::ValidationError(response));
+            }
+        }
+        if let Some(table) = collections.get_mut(collection_name) {
+            // entry represents a filter dict on fields to match on 
+            // example: { "provider" : "abc" }
+
+            // get only entries that do NOT match all the fields in `entry_object`
+            let matched_entries: Vec<Value> = table.iter().filter(|existing_entry| {
+                // Check if the existing entry is a JSON object
+                existing_entry.as_object().map_or(false, |existing_fields| {
+                    // Ensure all fields in `entry_object` match the corresponding fields in `existing_fields`
+                    entry_object.iter().all(|(key, value)| {
+                        existing_fields.get(key) == Some(value)
+                    })
+                })
+            }).cloned().collect();
+
+            // reply to sender
+            let response = Value::Array(matched_entries).to_string();
+            return Ok(response);
+        }
+        else {
+            // reply to sender
+            let response = format!("collection '{}' does not exist.", collection_name);
+            return Err(DistriError::ValidationError(response));
         }
     }
 

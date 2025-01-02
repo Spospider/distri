@@ -281,7 +281,7 @@ async fn main() {
                     let mut failures = 0;
                     let start_time = Instant::now();
                     let params = vec!["catalog"];
-                    let mut client_catalogue =json!({
+                    let mut client_catalogue = json!({
                         "images" : {
                             "img1" : {
                                 "size" : "value",
@@ -297,23 +297,23 @@ async fn main() {
                         "doc" : "1",
                         "provider" : "127.0.0.1:1234"
                     }); 
-                    let result = client.send_data_with_params(to_vec(&client_catalogue).unwrap(), "AddDocument", params.clone()).await;
+                    let result = client.add_document("catalog", client_catalogue.clone()).await;
                     match result {
                         Ok(_) => {}
                         Err(_) => failures += 1,
                     }
-                    let result = client.send_data_with_params(Vec::new(), "ReadCollection", params.clone()).await;
+                    let result = client.read_collection("catalog", None).await;
                     match result {
                         Ok(_) => {}
                         Err(_) => failures += 1,
                     }
                     client_catalogue["New thing"] = Value::String("some txt".to_string());
-                    let result = client.send_data_with_params(to_vec(&client_catalogue).unwrap(), "UpdateDocument", params.clone()).await;
+                    let result = client.update_document("catalog", client_catalogue.clone()).await;
                     match result {
                         Ok(_) => {}
                         Err(_) => failures += 1,
                     }
-                    let result = client.send_data_with_params(Vec::new(), "ReadCollection", params.clone()).await;
+                    let result = client.read_collection("catalog", None).await;
                     match result {
                         Ok(_) => {}
                         Err(_) => failures += 1,

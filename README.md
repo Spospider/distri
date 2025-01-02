@@ -265,5 +265,5 @@ Comments on DB test:
 - to improve db response times, an update time is employed, where the nodes are not allowed to sync for a small period of time after an update, to reduce communication overhead. One node (the last one elected as having the latest data) is the one who's gonna do all BD requests for that period of time.
 - but the elected value does eventually get out of sync, and other nodes modify their version of the db.
 - when they do sync, the one with the latest DB version overwrites the other, thus this is why the number of entries is less than expected when there are multiple cloudnodes.
-- Future work to solve this is to have Db sycn throuhg merging instead of overwriting. and also through enhancing the sync by instead of dumping all DB data in the response, it sends the UUIDs it has, the other node then checks and they only exchance data they don't have.
+- Future work to solve this is to have Db sync through merging instead of overwriting. and also through enhancing the sync by instead of dumping all DB data in the response, it sends the UUIDs it has, the other node then checks and they only exchance data they don't have.
 - However in cases where there is no tight data operations our system proves functional and in sync.
