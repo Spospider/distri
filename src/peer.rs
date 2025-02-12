@@ -11,8 +11,8 @@ use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 use serde_json::{to_vec, Value, json};
-use crate::utils::{recv_reliable, recv_with_timeout, send_reliable, send_with_retry, server_decrypt_img, peer_decrypt_img, DEFAULT_TIMEOUT, MAX_RETRIES};
-
+use crate::utils::peer_decrypt_img;
+use crate::networking::{recv_reliable, recv_with_timeout, send_reliable, send_with_retry, DEFAULT_TIMEOUT, MAX_RETRIES};
 use crate::client::Client;
 
 pub struct Peer {

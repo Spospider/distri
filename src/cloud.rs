@@ -2,6 +2,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use std::collections::{HashMap, VecDeque};
+use std::error::Error;
 use std::sync::Arc;
 use std::net::SocketAddr;
 // use std::io::Result;
@@ -10,19 +11,26 @@ use rand::Rng;
 use serde_json::{json, to_string, Value};
 use colored::*; // Import the trait for coloring
 use uuid::Uuid;
+use tracing_subscriber::filter::LevelFilter;
+use tracing::{ instrument, info, warn, error, debug};
+use tracing_error::{InstrumentResult, TracedError};
+
+
 
 use crate::utils::{
     extract_args, 
     generate_response,
+    DBOp, 
+    DistriError,
+    NodeInfo
+};
+use crate::networking::{
+    DEFAULT_TIMEOUT,
+    MAX_RETRIES,
     recv_reliable, 
     recv_with_timeout, 
     send_reliable, 
-    send_with_retry, 
-    DBOp, 
-    DistriError,
-    NodeInfo, 
-    DEFAULT_TIMEOUT, 
-    MAX_RETRIES,
+    send_with_retry 
 };
 use crate::service::Service;
 
@@ -48,6 +56,7 @@ pub struct CloudNode {
     total_task_time:Arc<Mutex<Duration>>,
 
     // Distributed DB 
+    collections_metadata: Arc<Mutex<HashMap<String, Vec<Value>>>>, // should be in complete sync with collections, within each table maps UUID -> {deleted, hash, timestamp, version_number} as per the CRDT 'OUR' - Model
     collections: Arc<Mutex<HashMap<String, Vec<Value>>>>,
     db_data_version: Arc<Mutex<u32>>,
     time_to_update: Arc<Mutex<bool>>,
@@ -112,6 +121,7 @@ impl CloudNode {
             total_task_time: Arc::new(Mutex::new(Duration::default())),
 
             // Distributed DB
+            collections_metadata: Arc::new(Mutex::new(collections.clone())),
             collections: Arc::new(Mutex::new(collections)),
             db_data_version: Arc::new(Mutex::new(0)),
             time_to_update: Arc::new(Mutex::new(true)),
@@ -122,7 +132,7 @@ impl CloudNode {
 
     /// Starts the server to listen for incoming requests, elect a leader, and process data
     pub async fn serve(self: &Arc<Self>) -> Result<(), DistriError> {
-        println!("Listening for incoming info requests on {:?}", self.public_socket.local_addr());
+        info!("Listening for incoming info requests on {:?}", self.public_socket.local_addr());
 
         // initialize request queue, multi-sender, multi receiver.
         // let (tx, mut rx) = mpsc::channel(1000);
@@ -136,7 +146,7 @@ impl CloudNode {
         let internal_queue1 = internal_queue.clone();
         tokio::spawn(async move {
             loop {
-                println!("looping1");
+                debug!("looping1");
                 let mut buffer: Vec<u8> = vec![0u8; 65535]; // Buffer to hold incoming UDP packets
                 let (size, addr) = match recv_with_timeout(&recv_self.public_socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
                     Ok((size, addr)) => (size, addr), // Successfully received data
@@ -144,58 +154,58 @@ impl CloudNode {
                         continue; // Early exit or handle the error in some other way
                     },
                     Err(e) => {
-                        eprintln!("Failed to receive data: {:?}", e);
+                        error!("Failed to receive data: {:?}", e);
                         continue; // Early exit or handle the error in some other way
                     }
                 };
 
                 // Failure mechanism
                 let random_value = rand::thread_rng().gen_range(1..=10);
-                println!("looping2");
+                debug!("looping2");
                 // If the random value is 0, do something
                 if random_value == 0 && !*recv_self.failed.lock().await  {  // start failure election
-                    println!("looping2.1");
+                    debug!("looping2.1");
                     let mut failed = recv_self.failed.lock().await;
                     *failed = false; // Reset election state initially
-                    println!("looping2.11");
+                    debug!("looping2.11");
                     let _ = recv_self.get_info(); // Retrieve updated info from all nodes
-                    println!("looping2.12");
+                    debug!("looping2.12");
                     *failed = recv_self.election_alg(None).await; // Elect a node to fail
-                    println!("looping2.13");
+                    debug!("looping2.13");
                     if *failed {
                         *recv_self.failed_number_of_times.lock().await += 1;
-                        println!("Node {} with is now failed.", recv_self.public_socket.local_addr().unwrap());
+                        debug!("Node {} with is now failed.", recv_self.public_socket.local_addr().unwrap());
                     }
-                    println!("looping2.2");
+                    debug!("looping2.2");
                 }
-                println!("looping3");
+                debug!("looping3");
                 
                 // while failed do nothing at all
                 if *recv_self.failed.lock().await {
-                    println!("looping3.1");
+                    debug!("looping3.1");
                     let random_value = rand::thread_rng().gen_range(0..=10);
                     if random_value == 0 {
-                        println!("looping3.2");
-                        println!("Node {} is back up from failure.", recv_self.public_socket.local_addr().unwrap());
+                        debug!("looping3.2");
+                        debug!("Node {} is back up from failure.", recv_self.public_socket.local_addr().unwrap());
                         let mut failed = recv_self.failed.lock().await;
                         *failed = false;
-                        println!("looping3.3");
+                        debug!("looping3.3");
                     }
                     else {
                         // stay failed
-                        println!("Node is dead");
+                        debug!("Node is dead");
                         continue;
                     }
                 }
-                println!("looping4");
+                debug!("looping4");
                 // Clone buffer data to process it in a separate task
                 let packet = buffer[..size].to_vec();
                 let received_msg: String = String::from_utf8_lossy(&packet).into_owned();
-                println!("received: {}", received_msg);
+                debug!("received: {}", received_msg);
 
                 // Send to queue
                 if received_msg == "ReqInternal: UpdateInfo" || received_msg == "ReqInternal: Stats" {
-                    println!("pushed into internal");
+                    debug!("pushed into internal");
                     internal_queue1.lock().await.push_back((received_msg, addr, Instant::now()));
                 }
                 else {
@@ -205,7 +215,7 @@ impl CloudNode {
                 // if tx.send((received_msg, addr)).await.is_err() {
                 //     eprintln!("Receiver task: failed to send to processing queue.");
                 // }
-                println!("looping5");
+                debug!("looping5");
             }
         });
 
@@ -249,23 +259,23 @@ impl CloudNode {
                 let node = proc_self.clone();
                 if received_msg == "ReqInternal: Stats"  {
                     // Spawn a task to handle the connection and data processing
-                    println!("doing stats");
+                    debug!("doing stats");
                     tokio::spawn(async move {
                         // let start_time = Instant::now(); // Record start time
                         if let Err(e) = node.handle_stats(addr).await {
-                            eprintln!("Error handling Stats: {:?}", e);
+                            error!("Error handling Stats: {:?}", e);
                         }
                         else{
-                            println!("Stats Done for {}", addr);
+                            info!("Stats Done for {}", addr);
                         }
 
                     });
                     
                 }
                 else if received_msg == "ReqInternal: UpdateInfo" {
-                    println!("received UpdateInfo");
+                    info!("received UpdateInfo");
                     if let Err(e) = proc_self.handle_info_request(addr).await {
-                        eprintln!("Error handling UpdateInfo: {:?}", e);
+                        // error!("Error handling UpdateInfo: {:?}", e);   
                     }
                 }
             }
@@ -342,13 +352,12 @@ impl CloudNode {
                             tokio::spawn(async move {
                                 let start_time = Instant::now(); // Record start time                    
                                 if let Err(e) = node.handle_service(&service, args, addr).await {
-                                    eprintln!("Error handling Service: {:?}", e);
                                     *node.failures.lock().await += 1; 
                                 }
                                 else{
                                     let elapsed: Duration = start_time.elapsed();
                                     *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
-                                    println!("Service Done for {}", addr);
+                                    info!("Service Done for {}", addr);
                                 }
                             });
                         }
@@ -357,18 +366,17 @@ impl CloudNode {
                         // Distributed DB stuff
                         else if received_msg == "ReqMem: CreateCollection" {
                             if let Err(e) = proc_self.db_add_table(addr).await {
-                                eprintln!("Error handling add table service: {:?}", e);
                             } else {
                                 *proc_self.completed.lock().await += 1;
-                                println!("AddCollection Done for {}", addr);
+                                info!("AddCollection Done for {}", addr);
                             }
                         }
                         else if received_msg.starts_with("ReqMem: AddDocument") {  // only check the first part of "ReqMem: AddDocument<tablename>"
                             let start_time = Instant::now();
                             if let Err(e) = proc_self.db_add_entry(_args.unwrap(), addr).await {
-                                eprintln!("Error handling add doc service: {:?}", e);
+                                
                             } else {
-                                println!("AddDocument Done for {}", addr);
+                                info!("AddDocument Done for {}", addr);
                                 let elapsed: Duration = start_time.elapsed();
                                 *proc_self.completed.lock().await += 1;
                                 *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
@@ -377,9 +385,9 @@ impl CloudNode {
                         else if received_msg.starts_with("ReqMem: UpdateDocument") {  // only check the first part of "ReqMem: AddDocument<tablename>"
                             let start_time = Instant::now();
                             if let Err(e) = proc_self.db_update_entry(_args.unwrap(), addr).await {
-                                eprintln!("Error handling update doc service: {:?}", e);
+                                
                             } else {
-                                println!("UpdateDocument Done for {}", addr);
+                                info!("UpdateDocument Done for {}", addr);
                                 let elapsed: Duration = start_time.elapsed();
                                 *proc_self.completed.lock().await += 1;
                                 *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
@@ -389,9 +397,9 @@ impl CloudNode {
                         else if received_msg.starts_with("ReqMem: DeleteDocument") {  // only check the first part of "ReqMem: AddDocument<tablename>"
                             let start_time = Instant::now();
                             if let Err(e) = proc_self.db_delete_entry(_args.unwrap(), addr).await {
-                                eprintln!("Error handling delete doc service: {:?}", e);
+                                
                             } else {
-                                println!("DeleteDocument Done for {}", addr);
+                                info!("DeleteDocument Done for {}", addr);
                                 let elapsed: Duration = start_time.elapsed();
                                 *proc_self.completed.lock().await += 1;
                                 *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
@@ -401,10 +409,10 @@ impl CloudNode {
                             tokio::spawn(async move {
                                 let start_time = Instant::now(); // Record start time
                                 if let Err(e) = node.db_read_table(_args.unwrap(), addr).await {
-                                    eprintln!("Error handling read table service: {:?}", e);
+                                    
                                 }
                                 else{
-                                    println!("ReadCollection Done for {}", addr);
+                                    info!("ReadCollection Done for {}", addr);
                                     let elapsed: Duration = start_time.elapsed();
                                     *node.total_task_time.lock().await += elapsed; // Accumulate the elapsed time into total_task_time
                                 }
@@ -453,7 +461,7 @@ impl CloudNode {
                     let json_obj: Value = match serde_json::from_slice(data) {
                         Ok(json) => json,
                         Err(e) => {
-                            eprintln!("CRITICAL: Failed to parse JSON in getinfo: {:?}", e);
+                            error!("CRITICAL: Failed to parse JSON in getinfo: {:?}", e);
                             return; // Handle the error appropriately, e.g., skip processing this data
                         }
                     };
@@ -508,7 +516,7 @@ impl CloudNode {
 
     /// Handles incoming TCP requests for node information
     async fn handle_info_request(self: &Arc<Self>, addr: SocketAddr) -> Result<(), DistriError> {
-        println!("Received info request from {}", addr);        
+        info!("Received info request from {}", addr);        
 
         let load = *self.completed.lock().await as i32 - *self.requests.lock().await as i32; // order is reversedd as the min value is selected
         // update own load, in var and in node table
@@ -536,24 +544,24 @@ impl CloudNode {
         // Send the response back to the requesting node
         // send_with_retry(&socket, response.as_bytes(), addr, MAX_RETRIES).await?;
         send_reliable(&socket, response.as_bytes(), addr).await?;
-        println!("Sent info response to {}: {}", addr, response);
+        info!("Sent info response to {}: {}", addr, response);
 
         Ok(())
     }
 
     /// Elects the leader node based on the lowest load value, breaking ties with the lowest id
     async fn elect_leader(self: &Arc<Self>, for_db:Option<bool>, prev_elected:Option<bool>) {
-        println!("{}", "elect_leader1".yellow());
+        info!("{}", "elect_leader1".yellow());
         let mut elected = self.elected.lock().await;
         if !self.time_to_update.lock().await.clone() && self.db_data_version.lock().await.clone() > 0 {
-            println!("{} {}", "skipped election".yellow(), elected);
+            info!("{} {}", "skipped election".yellow(), elected);
             if let Some(elect_val) = prev_elected {
                 *elected = elect_val;
             }
             return;
         }
         *self.time_to_update.lock().await = false;
-        println!("elected locked");
+        info!("elected locked");
         
         // elected = true if there are no known neighbors
         if self.nodes.lock().await.is_empty() {
@@ -568,7 +576,7 @@ impl CloudNode {
         // println!("{}", "elect_leader3".yellow());
         
         *elected = self.election_alg(for_db).await; // Elect a leader based on load and id values
-        println!("{} {}","elected value:".yellow(), elected);
+        info!("{} {}","elected value:".yellow(), elected);
         // *self.electing.lock().await = false;
         let newself = self.clone();
         tokio::spawn(
@@ -634,7 +642,7 @@ impl CloudNode {
             let socket: UdpSocket = match UdpSocket::bind("0.0.0.0:0").await {
                 Ok(socket) => socket,
                 Err(e) =>{
-                    eprintln!("Couldn't allocate socket in DB_sync_publish: {}", e);
+                    error!("Couldn't allocate socket in DB_sync_publish: {}", e);
                     return;
                 }
             };
@@ -801,12 +809,12 @@ impl CloudNode {
 
 
     // Cloud DB request handlers
+    #[instrument(name = "db_add_table", skip(self, addr))]
     async fn db_add_table(&self, addr: SocketAddr) -> Result<Option<String>, DistriError> { // change return type to option?
-
         // send ok
         let socket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
-        println!("Sent 'OK' message for AddCollection to {}", addr);
+        debug!("Sent 'OK' message for AddCollection to {}", addr);
         
         // receive data
         // Loop to ensure we get data from the correct client
@@ -834,16 +842,16 @@ impl CloudNode {
                     }
                 },
                 Ok((_, _, recv_addr)) => {
-                    eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                    error!("Received data from unexpected address: {:?}", recv_addr);
                     // Ignore and continue to wait for correct address
                     (0, 0, recv_addr)
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    eprintln!("Receive operation timed out");
+                    error!("Receive operation timed out");
                     return Ok(None);
                 },
                 Err(e) => {
-                    eprintln!("Failed to receive data: {:?}", e);
+                    error!("Failed to receive data: {:?}", e);
                     return Ok(None);
                 }
             };
@@ -852,15 +860,16 @@ impl CloudNode {
 
     }
     // Add an entry to a specific table
+    #[instrument(name = "db_add_entry", skip(self, args, addr))]
     async fn db_add_entry(&self, args: HashMap<String, String>,  addr: SocketAddr) -> Result<String, DistriError> { // change to option so that ? delegates errors to above function
         // Process input var
-        println!("IN db_add_entry");
+        debug!("IN db_add_entry");
         let collection_name = &args["table"];
 
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         // send ok
         send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
-        println!("{:?} Sent 'OK' message for AddEntry to {}", socket.local_addr(), addr);
+        debug!("{:?} Sent 'OK' message for AddEntry to {}", socket.local_addr(), addr);
 
         // recieve data
         // Loop to ensure we get data from the correct client
@@ -868,7 +877,7 @@ impl CloudNode {
             let _ = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     let mut my_data_version = self.db_data_version.lock().await;
-                    println!("done recieving");
+                    debug!("done recieving");
                     let packet = packet[..size].to_vec();
                     
                     let mut entry: Value = match serde_json::from_slice(&packet) {
@@ -881,7 +890,7 @@ impl CloudNode {
                         }
                     };
 
-                    let op_result = self.add_doc(collection_name, entry).await;
+                    let op_result = self.add_doc(collection_name, entry).await.map_err(|e| DistriError::OperationalError(e.to_string()));
                     if op_result.is_ok() {
                         *my_data_version += 1;
                     }
@@ -889,16 +898,16 @@ impl CloudNode {
                     send_reliable(&socket, generate_response(op_result).as_bytes(), addr).await?;
                 }, // Successfully received data
                 Ok((_, _, recv_addr)) => {
-                    eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                    error!("Received data from unexpected address: {:?}", recv_addr);
                     // Ignore and continue to wait for correct address
                     ()
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    eprintln!("Receive operation timed out");
+                    error!("Receive operation timed out");
                     return Err(DistriError::NetworkError("Receive operation timed out".to_string()));
                 },
                 Err(e) => {
-                    eprintln!("Failed to receive data: {:?}", e);
+                    error!("Failed to receive data: {:?}", e);
                     return Err(DistriError::OperationalError(format!(
                         "Failed to receive data: {:?}",
                         e
@@ -906,10 +915,12 @@ impl CloudNode {
                 }
             };
         }
+        error!("Client did not communicate");
         return Err(DistriError::OrchestrationError("Client did not Communicate".to_string()));
     }
 
     // Update an entry in a specific table
+    #[instrument(name = "db_update_entry", skip(self, args, addr))]
     async fn db_update_entry(&self, args: HashMap<String, String>, addr: SocketAddr) -> Result<String, DistriError> {
         // Process input variable
         let collection_name = &args["table"];
@@ -917,22 +928,22 @@ impl CloudNode {
         let socket: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?; // Bind to an available random port
         // Send OK response
         send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
-        println!("{:?} Sent 'OK' message for UpdateEntry to {}", socket.local_addr(), addr);
+        debug!("{:?} Sent 'OK' message for UpdateEntry to {}", socket.local_addr(), addr);
 
         // Receive data
         // Loop to ensure we get data from the correct client
         for _ in 0..5 {
             let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
-                    println!("Done receiving");
+                    debug!("Done receiving");
                     let mut my_data_version = self.db_data_version.lock().await;
                     let packet = packet[..size].to_vec();
-                    let data: String = String::from_utf8_lossy(&packet).trim().to_string();
+                    // let data: String = String::from_utf8_lossy(&packet).trim().to_string();
                     
                     let mut entry_to_update: Value = match serde_json::from_slice(&packet) {
                         Ok(value) => value,
                         Err(e) => {
-                            eprintln!("Failed to parse JSON: {:?}", e);
+                            error!("Failed to parse JSON: {:?}", e);
 
                             // Reply to sender
                             let err = DistriError::ValidationError(format!("Error:Failed to parse JSON: {:?}", e));
@@ -941,7 +952,7 @@ impl CloudNode {
                         }
                     };
 
-                    let op_result = self.update_doc(collection_name, entry_to_update).await;
+                    let op_result= self.update_doc(collection_name, entry_to_update).await.map_err(|e| DistriError::OperationalError(e.to_string()));
                     if op_result.is_ok() {
                         *my_data_version += 1;
                     }
@@ -951,24 +962,26 @@ impl CloudNode {
 
                 }, // Successfully received data
                 Ok((_, _, recv_addr)) => {
-                    eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                    error!("Received data from unexpected address: {:?}", recv_addr);
                     // Ignore and continue to wait for correct address
                     (0, 0, recv_addr)
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    eprintln!("Receive operation timed out");
+                    error!("Receive operation timed out");
                     return Err(DistriError::NetworkError("Receive operation timed out".to_string()));
                 },
                 Err(e) => {
-                    eprintln!("Failed to receive data: {:?}", e);
+                    error!("Failed to receive data: {:?}", e);
                     return Err(DistriError::ValidationError("No variable supplied".to_string()));
                 }
             };
         }
+        error!("Client did not communicate");
         return Err(DistriError::OrchestrationError("Client did not communicate".to_string()));
     }
     
     // Add an entry to a specific table
+    #[instrument(name = "db_delete_entry", skip(self, args, addr))]
     async fn db_delete_entry(&self, args: HashMap<String, String>,  addr: SocketAddr) -> Result<String, DistriError> { // change to option so that ? delegates errors to above function
         // Process input var
         let collection_name = &args["table"];
@@ -977,7 +990,7 @@ impl CloudNode {
 
         // send ok
         send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
-        println!("Sent 'OK' message for AddEntry to {}", addr);
+        debug!("Sent 'OK' message for AddEntry to {}", addr);
 
         // recieve data
         // Loop to ensure we get data from the correct client
@@ -990,7 +1003,7 @@ impl CloudNode {
                     let entry: Value = match serde_json::from_slice(&packet) {
                         Ok(value) => value, // Only proceed if it's an object
                         Err(e) => {
-                            eprintln!("Failed to parse JSON: {:?}", e);
+                            error!("Failed to parse JSON: {:?}", e);
 
                             // reply to sender
                             let response = format!("Failed to parse JSON: {:?}", e);
@@ -999,7 +1012,7 @@ impl CloudNode {
                         }
                     };
 
-                    let op_result = self.delete_doc(collection_name, entry).await;
+                    let op_result = self.delete_doc(collection_name, entry).await.map_err(|e| DistriError::OperationalError(e.to_string()));
                     if op_result.is_ok() {
                         *my_data_version += 1;
                     }
@@ -1017,11 +1030,13 @@ impl CloudNode {
                 }
             };
         }
+        error!("Client did not communicate");
         return Err(DistriError::OrchestrationError("Client did not communicate".to_string()));
     }
     
 
     // Read a table and return it as a JSON array
+    #[instrument(name = "db_read_table", skip(self, args, addr))]
     async fn db_read_table(&self, args: HashMap<String, String>, addr: SocketAddr) -> Result<String, DistriError> {
         // Extract table name from the received packet as a string
         let collection_name = &args["table"];
@@ -1029,7 +1044,7 @@ impl CloudNode {
 
         // send ok
         send_with_retry(&socket, b"OK", addr, MAX_RETRIES).await?;
-        println!("Sent 'OK' message for AddEntry to {}", addr);
+        debug!("Sent 'OK' message for AddEntry to {}", addr);
 
         // if there is filtering info
         match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
@@ -1039,7 +1054,7 @@ impl CloudNode {
                 let entry: Value = match serde_json::from_slice(&packet) {
                     Ok(value) => value, // Only proceed if it's an object
                     Err(e) => {
-                        eprintln!("Failed to parse JSON: {:?}", e);
+                        error!("Failed to parse JSON: {:?}", e);
 
                         // reply to sender
                         let response = format!("Failed to parse JSON: {:?}", e);
@@ -1048,11 +1063,11 @@ impl CloudNode {
                     }
                 };
                 let _my_db_version = self.db_data_version.lock().await;
-                let op_result = self.read_docs(collection_name, entry).await;
+                let op_result = self.read_docs(collection_name, entry).await.map_err(|e| DistriError::OperationalError(e.to_string()));
                 send_reliable(&socket, generate_response(op_result).as_bytes(), addr).await?;
             },
             Ok((_, _, recv_addr)) => {
-                eprintln!("Received data from unexpected address: {:?}", recv_addr);
+                warn!("Received data from unexpected address: {:?}", recv_addr);
                 // // Ignore and continue to wait for correct address
                 ()
             },
@@ -1060,12 +1075,14 @@ impl CloudNode {
                 ()
             }
         };
+        error!("Client did not communicate");
         Err(DistriError::OrchestrationError("Client did not communicate".to_string()))
     }
 
 
     /// Immediate DB ops
-    async fn add_doc(&self, collection_name:&str, mut entry: Value) -> Result<String, DistriError> {
+    #[instrument(name = "Add Doc", skip(self, entry), fields(collection = collection_name))]
+    async fn add_doc(&self, collection_name:&str, mut entry: Value) -> Result<String, TracedError<DistriError>> {
         let mut my_data_version = self.db_data_version.lock().await;
 
         // Add random uuid
@@ -1086,7 +1103,7 @@ impl CloudNode {
             table.push(entry);
             // update data version with any change in DB
             *my_data_version += 1;
-            println!("Added Doc: {}", uuid);
+            info!("Added Doc: {}", uuid);
 
             // reply to sender
             return Ok(uuid);
@@ -1094,20 +1111,21 @@ impl CloudNode {
             // reply to sender
             let response = format!("collection '{}' does not exist.", collection_name);
             // retrun error properly here
-            return Err(DistriError::ValidationError(response));
+            return Err(DistriError::ValidationError(response)).in_current_span();
         }
     }
 
-    async fn update_doc(&self, collection_name:&str, mut entry: Value) -> Result<String, DistriError> {
+    #[instrument(name = "Update Doc", skip(self, entry), fields(collection = collection_name))]
+    async fn update_doc(&self, collection_name:&str, mut entry: Value) -> Result<String, TracedError<DistriError>> {
         // Extract ID for matching
         let id: String = if let Value::Object(ref obj) = entry {
             if let Some(Value::String(id)) = obj.get("UUID") {
                 id.clone()
             } else {
-                return Err(DistriError::ValidationError("No valid 'UUID' field found in JSON".to_string()));
+                return Err(DistriError::ValidationError("No valid 'UUID' field found in JSON".to_string())).in_current_span();
             }
         } else {
-            return Err(DistriError::ValidationError("JSON must be an object".to_string()));
+            return Err(DistriError::ValidationError("JSON must be an object".to_string())).in_current_span();
         };
 
         let mut collections = self.collections.lock().await;
@@ -1115,7 +1133,7 @@ impl CloudNode {
             // Find the entry to update
             if let Some(existing_entry) = table.iter_mut().find(|doc| {
                 if let Value::Object(ref obj) = doc {
-                    println!("Comparing uuids {:?} == {:?}", obj.get("UUID").unwrap().as_str().unwrap_or("NULL") , id.clone().as_str());
+                    info!("Comparing uuids {:?} == {:?}", obj.get("UUID").unwrap().as_str().unwrap_or("NULL") , id.clone().as_str());
                     obj.get("UUID").unwrap().as_str().unwrap_or("NULL") == id.clone().as_str()
                 } else {
                     false
@@ -1146,17 +1164,17 @@ impl CloudNode {
         } else {
             // Reply to sender
             let response = format!("collection '{}' does not exist.", collection_name);
-            return Err(DistriError::ValidationError(response));
+            return Err(DistriError::ValidationError(response)).in_current_span();
         }
     }
-
-    async fn delete_doc(&self, collection_name:&str, entry: Value) -> Result<String, DistriError> {
+    #[instrument(name = "Delete Doc", skip(self, entry), fields(collection = collection_name))]
+    async fn delete_doc(&self, collection_name:&str, entry: Value) -> Result<String, TracedError<DistriError>> {
         // Ensure `entry` is a JSON object for matching
         let entry_object = match entry.as_object() {
             Some(obj) => obj,
             None => {
                 let response = format!("Entry is not a JSON object {:?}", entry);
-                return Err(DistriError::ValidationError(response));
+                return Err(DistriError::ValidationError(response)).in_current_span();
             }
         };
         
@@ -1180,15 +1198,16 @@ impl CloudNode {
         } else {
             // reply to sender
             let response = format!("collection '{}' does not exist.", collection_name);
-            return Err(DistriError::ValidationError(response))
+            return Err(DistriError::ValidationError(response)).in_current_span()
         }
     }
 
-    async fn read_docs(&self, collection_name:&str, entry: Value) -> Result<String, DistriError> {
+    #[instrument(name = "Read Doc", skip(self, entry), fields(collection = collection_name))]
+    async fn read_docs(&self, collection_name:&str, entry: Value) -> Result<String, TracedError<DistriError>> {
         let entry_object = match entry.as_object() {
             Some(obj) => obj,
             None => {
-                return Err(DistriError::ValidationError("Entry must be a JSON object".to_string()));
+                return Err(DistriError::ValidationError("Entry must be a JSON object".to_string())).in_current_span();
             }
         };
 
@@ -1202,7 +1221,7 @@ impl CloudNode {
             } else {
                 // Return an error if the table doesn't exist
                 let response = format!("collection '{}' does not exist.", collection_name);
-                return Err(DistriError::ValidationError(response));
+                return Err(DistriError::ValidationError(response)).in_current_span();
             }
         }
         if let Some(table) = collections.get_mut(collection_name) {
@@ -1227,7 +1246,7 @@ impl CloudNode {
         else {
             // reply to sender
             let response = format!("collection '{}' does not exist.", collection_name);
-            return Err(DistriError::ValidationError(response));
+            return Err(DistriError::ValidationError(response)).in_current_span();
         }
     }
 

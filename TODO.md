@@ -2,6 +2,18 @@
 
 This TODO list outlines ongoing tasks, feature enhancements, and issues within the Distri framework. Whether you're a first-time contributor or experienced developer, feel free to contribute to any of the tasks listed here.
 
+## Immediate list
+- (Done, but maintain) neat logger functionality in distry error -> config file for log output location?
+- DB syncing strategy revisit
+  - rethink data structures for the DB? something that integrates the merging within, and the metadata.
+  - Update collection metadata everywhere to maintain it. 
+  - use merge strategy, deletions update metadata "removed bool", compare version_numbers then UTC timestamps
+  - when adding a doc, if its UUID is removed, then update it, and all metadata.
+  - exchange metadata, then actual data for networking efficiency.
+  - sync, send what i have (metadata), the other end does the merging and asks for what it NEEDS.
+
+- error handling in client, raising errors received to client side, handling all cases
+
 ## collection of Contents
 1. [Bug Fixes](#bug-fixes)
 2. [Features to Implement](#features-to-implement)

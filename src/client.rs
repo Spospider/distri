@@ -1,17 +1,18 @@
-use tokio::net::UdpSocket;
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::error::Error;
-use crate::utils::{
-    DEFAULT_TIMEOUT, 
-    send_with_retry, 
-    recv_with_timeout, 
+use tokio::net::UdpSocket;
+use tokio::time::Duration;
+
+use crate::networking::{
+    DEFAULT_TIMEOUT,
     recv_reliable, 
-    send_reliable
+    recv_with_timeout, 
+    send_reliable, 
+    send_with_retry 
 };
 use crate::service::Service;
-use tokio::time::Duration;
 
 
 
