@@ -22,7 +22,7 @@ pub struct NodeInfo {
     pub load: i32,
     pub id: u16,
     pub addr: SocketAddr,
-    pub db_version: u32,
+    pub db_version: u64,
 }
 
 #[derive(Debug, thiserror::Error, Clone)]

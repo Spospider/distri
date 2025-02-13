@@ -1,7 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{self, HashMap};
+use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use serde_json::Value;
+use serde_json::{Value, json};
+use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use tokio::time::{sleep, Duration};
@@ -14,8 +16,8 @@ const PRUNE_INTERVAL:u64 = 1500;
 
 
 // Define metadata structure for CRDT
-#[derive(Clone, Debug)]
-struct Metadata {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Metadata {
     deleted: bool,
     hash: String,
     timestamp: DateTime<Utc>,
@@ -24,20 +26,30 @@ struct Metadata {
 
 #[derive(Clone)]
 pub struct DB {
-    collections: Arc<Mutex<HashMap<String, HashMap<Uuid, Value>>>>,
-    collections_metadata: Arc<Mutex<HashMap<String, HashMap<Uuid, Metadata>>>>,
-    data_version: Arc<Mutex<u64>>,
-    time_to_update: Arc<Mutex<bool>>,
+    collections:            Arc<Mutex<HashMap<String, HashMap<Uuid, Value>>>>,
+    collections_metadata:   Arc<Mutex<HashMap<String, HashMap<Uuid, Metadata>>>>,
+    pub data_version:       Arc<Mutex<u64>>,
+    pub time_to_update:     Arc<Mutex<bool>>,
 }
 
 impl DB {
-    pub fn new() -> Self {
+    pub fn new(collections:HashMap<String, HashMap<Uuid, Value>>, collections_metadata:HashMap<String, HashMap<Uuid, Metadata>>) -> Self {
         DB {
-            collections: Arc::new(Mutex::new(HashMap::new())),
-            collections_metadata: Arc::new(Mutex::new(HashMap::new())),
+            collections: Arc::new(Mutex::new(collections)),
+            collections_metadata: Arc::new(Mutex::new(collections_metadata)),
             data_version: Arc::new(Mutex::new(0)),
             time_to_update: Arc::new(Mutex::new(true)),
         }
+    }
+
+    /// Converts all metadata in the DB into a JSON string.
+    pub async fn get_metadata_json(&self) -> Result<String, String> {
+        let _ = self.data_version.lock().await; // lock this first as it is the first thing to be locked always
+        let metadata_map = self.collections_metadata.lock().await;
+
+        // Serialize to string
+        serde_json::to_string(&metadata_map.clone())
+            .map_err(|e| format!("Failed to serialize metadata: {}", e))
     }
 
    /// Merge incoming metadata and determine which UUIDs need to be requested.
