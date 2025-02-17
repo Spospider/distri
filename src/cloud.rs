@@ -1,11 +1,11 @@
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{self, HashMap, VecDeque};
 use std::error::Error;
 use std::sync::Arc;
 use std::net::SocketAddr;
-// use std::io::Result;
+use sha2::{Sha256, Digest};
 use std::time::{Duration, Instant};
 use rand::Rng; 
 use serde_json::{json, to_string, Value};
@@ -32,6 +32,10 @@ use crate::networking::{
     send_reliable, 
     send_with_retry 
 };
+use crate::db::{
+    DB,
+    Metadata
+};
 use crate::service::Service;
 
 
@@ -56,11 +60,9 @@ pub struct CloudNode {
     total_task_time:Arc<Mutex<Duration>>,
 
     // Distributed DB 
-    collections_metadata: Arc<Mutex<HashMap<String, Vec<Value>>>>, // should be in complete sync with collections, within each table maps UUID -> {deleted, hash, timestamp, version_number} as per the CRDT 'OUR' - Model
-    collections: Arc<Mutex<HashMap<String, Vec<Value>>>>,
-    db_data_version: Arc<Mutex<u32>>,
-    time_to_update: Arc<Mutex<bool>>,
+    db: DB,
     
+    // Services
     services: Vec<Arc<dyn Service + 'static>>,
 }
 
@@ -96,8 +98,10 @@ impl CloudNode {
               
         // initialize any table names that should exist
         let mut collections = HashMap::new();
+        let mut collections_metadata = HashMap::new();
         for collection_name in collection_names.unwrap_or_else(Vec::new) {
-            collections.insert(collection_name.to_string(), Vec::new());
+            collections.insert(collection_name.to_string(), HashMap::new());
+            collections_metadata.insert(collection_name.to_string(), HashMap::new());
         }
 
         let services: Vec<Arc<dyn Service + 'static>> = services.into_iter().map(Arc::from).collect();
@@ -121,10 +125,12 @@ impl CloudNode {
             total_task_time: Arc::new(Mutex::new(Duration::default())),
 
             // Distributed DB
-            collections_metadata: Arc::new(Mutex::new(collections.clone())),
-            collections: Arc::new(Mutex::new(collections)),
-            db_data_version: Arc::new(Mutex::new(0)),
-            time_to_update: Arc::new(Mutex::new(true)),
+            db: DB::new(collections, collections_metadata),
+
+            // collections_metadata: Arc::new(Mutex::new(collections.clone())),
+            // collections: Arc::new(Mutex::new(collections)),
+            // db.data_version: Arc::new(Mutex::new(0)),
+            // db.time_to_update: Arc::new(Mutex::new(true)),
 
             services,
         }))
@@ -168,7 +174,7 @@ impl CloudNode {
                     let mut failed = recv_self.failed.lock().await;
                     *failed = false; // Reset election state initially
                     debug!("looping2.11");
-                    let _ = recv_self.get_info(); // Retrieve updated info from all nodes
+                    let _ = recv_self.get_info(None); // Retrieve updated info from all nodes
                     debug!("looping2.12");
                     *failed = recv_self.election_alg(None).await; // Elect a node to fail
                     debug!("looping2.13");
@@ -225,23 +231,6 @@ impl CloudNode {
 
         tokio::spawn(async move {
             loop {
-                // // Only pop from queue the entries that start with reqInternal
-                // let (received_msg, addr, recv_time) = {
-                //     // Lock the queue
-                //     let mut queue = int_queue.lock().await;
-            
-                //     // Loop through the queue from back to front
-                //     if let Some(pos) = queue.iter().rposition(|(msg, _, _)| msg.starts_with("reqInternal")) {
-                //         // If a message starting with "reqInternal" is found, pop it from the queue and return the entry
-                //         let (received_msg, addr, recv_time) = queue.remove(pos).unwrap();
-                //         // Unlock the queue after popping the item
-                //         (received_msg, addr, recv_time)
-                //     } else {
-                //         // If no valid entry is found, unlock the queue and continue
-                //         drop(queue); // Explicitly drop the lock before continuing the loop
-                //         continue;
-                //     }
-                // };
                 // Pop from queue
                 let (received_msg, addr, recv_time) = match int_queue.lock().await.pop_back() {
                     Some((received_msg, addr, recv_time)) => (received_msg, addr, recv_time),
@@ -291,23 +280,6 @@ impl CloudNode {
             tokio::spawn(async move {
                 loop {
                     // Pop from queue
-                    // Only pop from queue the entries that DONT start with reqInternal
-                    // let (received_msg, addr, recv_time) = {
-                    //     // Lock the queue
-                    //     let mut queue = proc_queue.lock().await;
-                
-                    //     // Loop through the queue from back to front
-                    //     if let Some(pos) = queue.iter().rposition(|(msg, _, _)| !msg.starts_with("reqInternal")) {
-                    //         // If a message starting with "reqInternal" is found, pop it from the queue and return the entry
-                    //         let (received_msg, addr, recv_time) = queue.remove(pos).unwrap();
-                    //         // Unlock the queue after popping the item
-                    //         (received_msg, addr, recv_time)
-                    //     } else {
-                    //         // If no valid entry is found, unlock the queue and continue
-                    //         drop(queue); // Explicitly drop the lock before continuing the loop
-                    //         continue;
-                    //     }
-                    // };
                     let (received_msg, addr, recv_time) = match proc_queue.lock().await.pop_back() {
                         Some((received_msg, addr, recv_time)) => (received_msg, addr, recv_time),
                         None => {
@@ -337,11 +309,10 @@ impl CloudNode {
                         });
                     }
 
-                    // Stats msgs and updateInfo msgs pass directly
-                    if proc_self.elected.lock().await.clone() { // only if elected, or its a stats request
+                    // Only if elected
+                    if proc_self.elected.lock().await.clone() {
                         println!("Handling {}", received_msg);
                         let node = proc_self.clone();
-                        // if received_msg == "Request: Encrypt"  {
                         let service_option = proc_self.services.iter().find(|s| s.name() == service_name);
                         let _args = extract_args(received_msg.as_str());
                         if received_msg.split_whitespace().nth(0).unwrap_or("") == "Request:" && service_option.is_some() && _args.is_ok() {
@@ -429,10 +400,20 @@ impl CloudNode {
         Ok(())
     }
               
+    /// DB Sync mechanism
+    /// base concept: send msg for Info Exchange including hash, and version number
+                    /// on the other end, version num = max(incoming_version_num, self.version_num)
+                    /// new data = current data union incoming data, growing set.
+            
+            /// Flow: Assuming fully connected nodes.
+            /// - db_announce: (TODO) announce new changes to all other nodes, publish, subscribe without responding. 
+            /// - handle_db_announce:
+            ///     - DB merges new info (meta + data)
+            /// - db_exchange: Periocially or with every db operation, exchange version num and hash with every other node, 
+            /// - handle_db_exchange: a node will check if it missed something and request it.
 
- // election stuff
-    // Retrieves updated information from all nodes using TCP messages
-    async fn get_info(self: &Arc<Self>) {
+    #[instrument(name = "DB Exchange", skip(self, from))]
+    async fn db_exchange(self: &Arc<Self>, from: Option<SocketAddr>) {
         
         let node_addresses: Vec<(String, SocketAddr)> = {
             let nodes = self.nodes.lock().await;
@@ -441,126 +422,105 @@ impl CloudNode {
     
         // Create a UDP socket
         let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
+
+        let my_db_metadata = match self.db.get_metadata_json().await {
+            Ok(str) => str,
+            Err(err) => {
+                error!(err);
+                return;
+            }
+        };
+        // Make a hash from it, to compare with others
+        let db_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(my_db_metadata.as_bytes());
+            format!("{:x}", hasher.finalize()) // Convert hash to a hex string
+        };
     
-        for (node_id, addr) in node_addresses {
+        for (_, addr) in node_addresses.clone() {
             if addr == self.public_socket.local_addr().unwrap() {
                 continue;
             }
-            let request_msg: &str = "ReqInternal: UpdateInfo";
-    
+            let request_msg = "ReqInternal: UpdateInfo |".to_owned() + &db_hash + "|"+ &self.db.data_version.lock().await.to_string();
             // Send the request to the node
-            send_with_retry(&socket, request_msg.as_bytes(), addr, 10).await.unwrap();
-            
-            // Receive the response from the node
-            // match recv_with_timeout(&socket, &mut buffer, Duration::from_secs(DEFAULT_TIMEOUT)).await {
-            let _ = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
+            send_with_retry(&socket, request_msg.as_bytes(), addr, 2).await.unwrap();
+        }
+    
+        for (_, addr) in node_addresses {
+            // Receive possible response from the node
+            let _ = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT / 2))).await {
                 Ok((packet, size, _)) => {
-                    let mut mydata_version = self.db_data_version.lock().await;
-                    let data = &packet[..size];
-                    // Convert data to JSON
-                    let json_obj: Value = match serde_json::from_slice(data) {
-                        Ok(json) => json,
+                    // should i check if responser is in node_addresses?
+                    
+                    // Convert received packet into a JSON string
+                    let packet_str = String::from_utf8_lossy(&packet[..size]);
+
+                    // Deserialize JSON: Expecting { "collection_name": { "uuid": { metadata_json } } }
+                    let remote_data: HashMap<String, HashMap<Uuid, Metadata>> = match serde_json::from_str(&packet_str) {
+                        Ok(data) => data,
                         Err(e) => {
-                            error!("CRITICAL: Failed to parse JSON in getinfo: {:?}", e);
-                            return; // Handle the error appropriately, e.g., skip processing this data
+                            error!("Failed to parse received metadata JSON: {:?}", e);
+                            continue;
                         }
                     };
 
-                    // let updated load = json_obj['load']
-                    let updated_load:i32 = json_obj.get("load").unwrap().as_i64().unwrap() as i32;
-                    // sync DB 
-                    if json_obj.get("db_version").unwrap().as_u64().unwrap() > mydata_version.clone() as u64 {
-                        // update   self.collections: Arc<Mutex<HashMap<String, Vec<Value>>>>, from json_obj.get("collections") which is created from serializing self.collections.lock().await.clone(),
-                        if let Some(new_collections) = json_obj.get("collections").and_then(|v| v.as_object()) {
-                            let mut collections_lock = self.collections.lock().await;
+                    // Figure out the  needed entries
+                    let mut needed_entries: HashMap<String, Vec<Uuid>> = HashMap::new();
+
+                    // Merge metadata for each collection and gather UUIDs of needed entries
+                    for (collection_name, remote_metadata) in remote_data.iter() {
+                        let required_uuids = self.db.merge_metadata(collection_name, remote_metadata.clone()).await;
+                        needed_entries.insert(collection_name.clone(), required_uuids);
+                    }
+
+                    // Construct response JSON: { "collection_name": { "uuid": data } }
+                    let mut response_data: HashMap<String, HashMap<Uuid, Value>> = HashMap::new();
+                    for (collection_name, uuids) in needed_entries.iter() {
+                        response_data.insert(collection_name.clone(), self.db.get_entries(collection_name, uuids.to_vec()).await);
+                    }
                     
-                            // Clear current collections and populate them with the new data
-                            collections_lock.clear();
-                            for (key, value) in new_collections {
-                                if let Some(array) = value.as_array() {
-                                    collections_lock.insert(key.clone(), array.clone());
-                                } else {
-                                    eprintln!("Expected an array for collection '{}', but found {:?}", key, value);
-                                    // Handle the error or skip this collection
-                                }
-                            }
-                        } else {
-                            eprintln!("Failed to update collections: 'collections' field is missing or not an object");
-                            // Handle error appropriately (e.g., skip updating or log error)
+                    // Serialize the response data to JSON string
+                    let response_json = match serde_json::to_string(&response_data) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!("Failed to serialize response JSON: {:?}", e);
+                            "{}".to_string()
                         }
-                        *mydata_version = json_obj.get("db_version").unwrap().as_u64().unwrap() as u32;
-                    }
-    
-                    let mut nodes = self.nodes.lock().await;
-                    if let Some(node_info) = nodes.get_mut(&node_id) {
-                        node_info.load = updated_load;
-                        let msg = format!("Updated info for node {}: load = {}", node_info.id, node_info.load);
-                        println!("{}", msg.yellow());
-                    }
-                    // (packet, size, recv_addr)
+                    };
+
+                    // Send response back
+                    match send_reliable(&socket, response_json.as_bytes(), addr).await {
+                        Ok(()) => {},
+                        Err(e)=> {
+                            error!("{}", e)
+                        }
+                    };
                 },
-                // Ok((_, _, recv_addr)) => {
-                //     eprintln!("Received data from unexpected address: {:?}", recv_addr);
-                //     // Ignore and continue to wait for correct address
-                //     // (0, 0, recv_addr)
-                // },
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    eprintln!("{}", "getinfo operation timed out".yellow());
+                    error!("Request to {} timed out", addr);
                 },
                 Err(e) => {
-                    eprintln!("Failed to receive response from {}: {:?}", addr, e);
+                    error!("Failed to receive response from {}: {:?}", addr, e);
                 }
             };
         }
     }
 
-    /// Handles incoming TCP requests for node information
-    async fn handle_info_request(self: &Arc<Self>, addr: SocketAddr) -> Result<(), DistriError> {
-        info!("Received info request from {}", addr);        
 
-        let load = *self.completed.lock().await as i32 - *self.requests.lock().await as i32; // order is reversedd as the min value is selected
-        // update own load, in var and in node table
-        *self.load.lock().await = load;
-        let myid = self.id.lock().await.clone().to_string();
-        let mut nodes = self.nodes.lock().await;
-        if let Some(node_info) = nodes.get_mut(&myid) {
-            node_info.load = load;
-        }
-        let data_version: u32;
-        let collections: HashMap<String, Vec<Value>>;
-        {
-            let _data_version = self.db_data_version.lock().await; // the data_version lock is the main lock for db operatiosn, it should always be captured first.
-            data_version = _data_version.clone();
-            collections = self.collections.lock().await.clone();
-        } 
-        let response = to_string(&json!({
-            "load": load,
-            "id": myid,
-            "collections": collections,
-            "db_version" : data_version,
-        })).unwrap();
-        let socket = UdpSocket::bind("0.0.0.0:0").await.expect("Failed to bind UDP socket");
+ // election stuff
 
-        // Send the response back to the requesting node
-        // send_with_retry(&socket, response.as_bytes(), addr, MAX_RETRIES).await?;
-        send_reliable(&socket, response.as_bytes(), addr).await?;
-        info!("Sent info response to {}: {}", addr, response);
-
-        Ok(())
-    }
-
-    /// Elects the leader node based on the lowest load value, breaking ties with the lowest id
+ /// Elects the leader node based on the lowest load value, breaking ties with the lowest id
     async fn elect_leader(self: &Arc<Self>, for_db:Option<bool>, prev_elected:Option<bool>) {
         info!("{}", "elect_leader1".yellow());
         let mut elected = self.elected.lock().await;
-        if !self.time_to_update.lock().await.clone() && self.db_data_version.lock().await.clone() > 0 {
+        if !self.db.time_to_update.lock().await.clone() && self.db.data_version.lock().await.clone() > 0 {
             info!("{} {}", "skipped election".yellow(), elected);
             if let Some(elect_val) = prev_elected {
                 *elected = elect_val;
             }
             return;
         }
-        *self.time_to_update.lock().await = false;
+        *self.db.time_to_update.lock().await = false;
         info!("elected locked");
         
         // elected = true if there are no known neighbors
@@ -571,7 +531,7 @@ impl CloudNode {
         
         // println!("{}", "elect_leader2".yellow());
         if *self.requests.lock().await > 1 {
-            self.get_info().await; // Retrieve updated info from all nodes
+            self.get_info(None).await; // Retrieve updated info from all nodes
         }
         // println!("{}", "elect_leader3".yellow());
         
@@ -583,7 +543,7 @@ impl CloudNode {
             async move {
             // Sleep for n seconds
             sleep(Duration::from_secs(1)).await;
-            *newself.time_to_update.lock().await = true;
+            *newself.db.time_to_update.lock().await = true;
         });
     }
 
@@ -592,7 +552,7 @@ impl CloudNode {
         let nodes = self.nodes.lock().await;
         let mut lowest_load = self.load.lock().await.clone();
         let mut elected_node = self.id.lock().await.clone();
-        let mut highest_db_version = self.db_data_version.lock().await.clone();
+        let mut highest_db_version = self.db.data_version.lock().await.clone();
         let my_db_version = highest_db_version.clone();
 
         // println!("{}", "election2".yellow());
@@ -764,11 +724,7 @@ impl CloudNode {
             Duration::from_secs(0)
         };
 
-        let table_stats: String = self.collections.lock().await.clone()
-            .iter()
-            .map(|(name, entries)| format!("{}: {} entries", name, entries.len()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let table_stats: String = self.db.get_stats().await.join(", ");
 
 
         // Create a human-readable stats report
@@ -791,7 +747,7 @@ impl CloudNode {
             total_time,
             avg_completion_time,
             table_stats,
-            self.db_data_version.lock().await.clone(),
+            self.db.data_version.lock().await.clone(),
         );
     
         // Send the stats report back to the client
@@ -822,7 +778,7 @@ impl CloudNode {
             let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     // Successfully received data from the correct client
-                    let mut my_data_version = self.db_data_version.lock().await;
+                    let mut my_data_version = self.db.data_version.lock().await;
                     let collection_name: &str = &String::from_utf8_lossy(&packet);
 
                     let mut collections = self.collections.lock().await;
@@ -876,7 +832,7 @@ impl CloudNode {
         for _ in 0..5 {
             let _ = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
-                    let mut my_data_version = self.db_data_version.lock().await;
+                    let mut my_data_version = self.db.data_version.lock().await;
                     debug!("done recieving");
                     let packet = packet[..size].to_vec();
                     
@@ -936,7 +892,7 @@ impl CloudNode {
             let (_, _, _) = match recv_reliable(&socket, Some(Duration::from_secs(DEFAULT_TIMEOUT))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
                     debug!("Done receiving");
-                    let mut my_data_version = self.db_data_version.lock().await;
+                    let mut my_data_version = self.db.data_version.lock().await;
                     let packet = packet[..size].to_vec();
                     // let data: String = String::from_utf8_lossy(&packet).trim().to_string();
                     
@@ -997,7 +953,7 @@ impl CloudNode {
         for _ in 0..5 {
             let _ = match recv_reliable(&socket, Some(Duration::from_secs(1))).await {
                 Ok((packet, size, recv_addr)) if recv_addr == addr => {
-                    let mut my_data_version = self.db_data_version.lock().await;
+                    let mut my_data_version = self.db.data_version.lock().await;
                     let packet = packet[..size].to_vec();
                     
                     let entry: Value = match serde_json::from_slice(&packet) {
@@ -1062,8 +1018,9 @@ impl CloudNode {
                         return Err(DistriError::ValidationError(response));
                     }
                 };
-                let _my_db_version = self.db_data_version.lock().await;
-                let op_result = self.read_docs(collection_name, entry).await.map_err(|e| DistriError::OperationalError(e.to_string()));
+                let _my_db_version = self.db.data_version.lock().await;
+                let op_result = self.db.get_entries(collection_name, entries)
+                let op_result: Result<_, DistriError> = self.read_docs(collection_name, entry).await.map_err(|e| DistriError::OperationalError(e.to_string()));
                 send_reliable(&socket, generate_response(op_result).as_bytes(), addr).await?;
             },
             Ok((_, _, recv_addr)) => {
@@ -1079,175 +1036,5 @@ impl CloudNode {
         Err(DistriError::OrchestrationError("Client did not communicate".to_string()))
     }
 
-
-    /// Immediate DB ops
-    #[instrument(name = "Add Doc", skip(self, entry), fields(collection = collection_name))]
-    async fn add_doc(&self, collection_name:&str, mut entry: Value) -> Result<String, TracedError<DistriError>> {
-        let mut my_data_version = self.db_data_version.lock().await;
-
-        // Add random uuid
-        let mut uuid= String::from("");
-        if let Value::Object(ref mut obj) = entry {
-            // if UUID does not exist in obj
-            if !obj.contains_key("UUID") {
-                uuid = Uuid::new_v4().to_string();
-                obj.insert("UUID".to_string(), Value::String(uuid.clone()));
-            }
-            else {
-                uuid = obj["UUID"].as_str().unwrap().to_string();
-            }
-        }
-
-        let mut collections = self.collections.lock().await;
-        if let Some(table) = collections.get_mut(collection_name) {
-            table.push(entry);
-            // update data version with any change in DB
-            *my_data_version += 1;
-            info!("Added Doc: {}", uuid);
-
-            // reply to sender
-            return Ok(uuid);
-        } else {
-            // reply to sender
-            let response = format!("collection '{}' does not exist.", collection_name);
-            // retrun error properly here
-            return Err(DistriError::ValidationError(response)).in_current_span();
-        }
-    }
-
-    #[instrument(name = "Update Doc", skip(self, entry), fields(collection = collection_name))]
-    async fn update_doc(&self, collection_name:&str, mut entry: Value) -> Result<String, TracedError<DistriError>> {
-        // Extract ID for matching
-        let id: String = if let Value::Object(ref obj) = entry {
-            if let Some(Value::String(id)) = obj.get("UUID") {
-                id.clone()
-            } else {
-                return Err(DistriError::ValidationError("No valid 'UUID' field found in JSON".to_string())).in_current_span();
-            }
-        } else {
-            return Err(DistriError::ValidationError("JSON must be an object".to_string())).in_current_span();
-        };
-
-        let mut collections = self.collections.lock().await;
-        if let Some(table) = collections.get_mut(collection_name) {
-            // Find the entry to update
-            if let Some(existing_entry) = table.iter_mut().find(|doc| {
-                if let Value::Object(ref obj) = doc {
-                    info!("Comparing uuids {:?} == {:?}", obj.get("UUID").unwrap().as_str().unwrap_or("NULL") , id.clone().as_str());
-                    obj.get("UUID").unwrap().as_str().unwrap_or("NULL") == id.clone().as_str()
-                } else {
-                    false
-                }
-            }) {
-                *existing_entry = entry; // Replace the entry
-                // Reply to sender
-                let response = "Document updated successfully".to_string();
-                return Ok(response);
-            } else { // match not found, add to collection anyway
-                // Add random uuid
-                let mut uuid = Uuid::new_v4().to_string();
-                if let Value::Object(ref mut obj) = entry {
-                    // if UUID does not exist in obj
-                    if !obj.contains_key("UUID") {
-                        obj.insert("UUID".to_string(), Value::String(uuid.clone()));
-                    }
-                    else {
-                        uuid = obj["UUID"].as_str().unwrap().to_string();
-                    }
-                }
-                table.push(entry);
-
-                // reply to sender
-                let response = "Document added successfully".to_string();
-                return Ok(response);
-            }
-        } else {
-            // Reply to sender
-            let response = format!("collection '{}' does not exist.", collection_name);
-            return Err(DistriError::ValidationError(response)).in_current_span();
-        }
-    }
-    #[instrument(name = "Delete Doc", skip(self, entry), fields(collection = collection_name))]
-    async fn delete_doc(&self, collection_name:&str, entry: Value) -> Result<String, TracedError<DistriError>> {
-        // Ensure `entry` is a JSON object for matching
-        let entry_object = match entry.as_object() {
-            Some(obj) => obj,
-            None => {
-                let response = format!("Entry is not a JSON object {:?}", entry);
-                return Err(DistriError::ValidationError(response)).in_current_span();
-            }
-        };
-        
-        let mut collections = self.collections.lock().await;
-        if let Some(table) = collections.get_mut(collection_name) {
-            // entry represents dict on fields to match on 
-            // example: { "provider" : "abc" }
-
-            // Retain only entries that do NOT match all the fields in `entry_object`
-            table.retain(|existing_entry| {
-                !existing_entry.as_object().map_or(false, |existing_fields| {
-                    entry_object.iter().all(|(key, value)| {
-                        existing_fields.get(key) == Some(value)
-                    })
-                })
-            });
-
-            // reply to sender
-            let response = "Docs deleted successfully.".to_string();
-            return Ok(response);
-        } else {
-            // reply to sender
-            let response = format!("collection '{}' does not exist.", collection_name);
-            return Err(DistriError::ValidationError(response)).in_current_span()
-        }
-    }
-
-    #[instrument(name = "Read Doc", skip(self, entry), fields(collection = collection_name))]
-    async fn read_docs(&self, collection_name:&str, entry: Value) -> Result<String, TracedError<DistriError>> {
-        let entry_object = match entry.as_object() {
-            Some(obj) => obj,
-            None => {
-                return Err(DistriError::ValidationError("Entry must be a JSON object".to_string())).in_current_span();
-            }
-        };
-
-        let mut collections = self.collections.lock().await;
-        if entry_object.is_empty() {
-            // fetch all data
-            if let Some(table) = collections.get(collection_name) {
-                // Convert the Vec<Value> to a JSON array and return it
-                let response = Value::Array(table.clone()).to_string();
-                return Ok(response)
-            } else {
-                // Return an error if the table doesn't exist
-                let response = format!("collection '{}' does not exist.", collection_name);
-                return Err(DistriError::ValidationError(response)).in_current_span();
-            }
-        }
-        if let Some(table) = collections.get_mut(collection_name) {
-            // entry represents a filter dict on fields to match on 
-            // example: { "provider" : "abc" }
-
-            // get only entries that do NOT match all the fields in `entry_object`
-            let matched_entries: Vec<Value> = table.iter().filter(|existing_entry| {
-                // Check if the existing entry is a JSON object
-                existing_entry.as_object().map_or(false, |existing_fields| {
-                    // Ensure all fields in `entry_object` match the corresponding fields in `existing_fields`
-                    entry_object.iter().all(|(key, value)| {
-                        existing_fields.get(key) == Some(value)
-                    })
-                })
-            }).cloned().collect();
-
-            // reply to sender
-            let response = Value::Array(matched_entries).to_string();
-            return Ok(response);
-        }
-        else {
-            // reply to sender
-            let response = format!("collection '{}' does not exist.", collection_name);
-            return Err(DistriError::ValidationError(response)).in_current_span();
-        }
-    }
 
 }
